@@ -395,69 +395,50 @@ struct LibraryView: View {
                     }
                 }
 
-                if !markedMeetingIDs.isEmpty {
-                    HStack {
-                        Text("\(markedMeetingIDs.count) selected").font(.system(size: 11)).foregroundStyle(.secondary)
-                        Spacer()
-                        Button(role: .destructive, action: deleteMarkedMeetings) {
-                            Label("Delete", systemImage: "trash")
-                        }
-                        .accessibilityIdentifier("delete-selected-meetings")
-                    }
-                }
-
-                if listHasFocus {
-                    HStack(spacing: 6) {
-                        KeyboardKeycap("Space")
-                        Text("select").font(.system(size: 10)).foregroundStyle(.secondary)
+                HStack(spacing: 8) {
+                    if !markedMeetingIDs.isEmpty {
+                        Text("\(markedMeetingIDs.count) selected")
+                            .font(.system(size: 11)).foregroundStyle(.secondary)
+                            .lineLimit(1)
                         Spacer(minLength: 8)
-                        KeyboardKeycap("D")
-                        Text("delete").font(.system(size: 10)).foregroundStyle(.secondary)
-                    }
-                }
-
-                HStack(spacing: 6) {
-                    if searchActive {
-                        KeyboardKeycap("Esc")
-                        Text("clear search").font(.system(size: 10)).foregroundStyle(.secondary)
-                    } else if detailFocused {
-                        KeyboardKeycap("h")
-                        Text("meetings").font(.system(size: 10)).foregroundStyle(.secondary)
-                        KeyboardKeycap("j/k")
-                        Text("scroll").font(.system(size: 10)).foregroundStyle(.secondary)
+                        Button(role: .destructive, action: deleteMarkedMeetings) {
+                            HStack(spacing: 5) {
+                                Label("Delete", systemImage: "trash")
+                                KeyboardKeycap("D")
+                            }
+                        }
+                        .font(.system(size: 11))
+                        .buttonStyle(.borderless)
+                        .help("Move selected meetings to Trash (D)")
+                        .accessibilityLabel("Delete selected meetings")
+                        .accessibilityIdentifier("delete-selected-meetings")
                     } else {
-                        KeyboardKeycap("j/k")
-                        Text("navigate").font(.system(size: 10)).foregroundStyle(.secondary)
+                        HStack(spacing: 5) {
+                            if searchActive {
+                                KeyboardKeycap("Esc")
+                                Text("Clear search")
+                            } else if detailFocused {
+                                KeyboardKeycap("H")
+                                Text("Meetings")
+                            } else if !filteredMeetings.isEmpty {
+                                KeyboardKeycap("Space")
+                                Text("Select")
+                            }
+                        }
+                        .font(.system(size: 10)).foregroundStyle(.secondary)
+                        Spacer(minLength: 8)
                     }
-                    Spacer()
                     Button { helpPresented.toggle() } label: {
                         Image(systemName: "questionmark.circle").font(.system(size: 15))
                     }
                     .buttonStyle(.plain).foregroundStyle(.secondary).help("Keyboard shortcuts")
                     .accessibilityLabel("Keyboard shortcuts")
                     .popover(isPresented: $helpPresented, arrowEdge: .bottom) {
-                        VStack(alignment: .leading, spacing: 9) {
-                            Text("Keyboard shortcuts").font(.system(size: 13, weight: .semibold))
-                            shortcut("Keyboard help", "?")
-                            shortcut("Search", "⌘F / ⌘K / /")
-                            shortcut("Move between meetings", "J / K · ↑ / ↓")
-                            shortcut("First / last meeting", "G G / ⇧G")
-                            shortcut("Select / deselect meeting", "Space")
-                            shortcut("Delete selected meetings", "D")
-                            shortcut("Open / return to list", "Return / L · H / Esc")
-                            shortcut("Switch meetings", "⌥↑ / ⌥↓")
-                            shortcut("Transcript / Notes", "⌘1 / ⌘2")
-                            shortcut("Scroll content", "J / K · Space · PgUp/PgDn")
-                            shortcut("Quick Recording", "⇧⌘R")
-                            if controller.quickRecordingShortcutAvailable {
-                                shortcut("Global Quick Recording", QuickRecordingShortcut.displayShortcut)
-                            }
-                            Text("Tab moves through available controls.").font(.system(size: 10)).foregroundStyle(.secondary).padding(.top, 2)
-                        }
-                        .padding(14).frame(width: 250, alignment: .leading)
+                        KeyboardShortcutsPopover(isPresented: $helpPresented,
+                                                 globalRecordingAvailable: controller.quickRecordingShortcutAvailable)
                     }
                 }
-                .padding(.top, 2)
+                .frame(height: 24)
             }
             .padding(16).frame(width: 264)
             .background(Color(nsColor: .controlBackgroundColor).opacity(0.4))
@@ -493,6 +474,10 @@ struct LibraryView: View {
         let option = flags.contains(.option)
         let shift = flags.contains(.shift)
         let key = event.charactersIgnoringModifiers?.lowercased() ?? ""
+        if helpPresented && event.keyCode == 53 {
+            helpPresented = false
+            return true
+        }
         if command && !flags.contains(.control) {
             if key == "f" || key == "k" { beginSearch(); return true }
             if key == "1" { tab = 0; detailFocused = true; return true }
@@ -576,8 +561,23 @@ struct LibraryView: View {
         alert.informativeText = meetings.count == 1
             ? "“\(meetings[0].title)” and its recording, transcript, and notes can be restored from Trash."
             : "Their recordings, transcripts, and notes can be restored from Trash."
-        alert.addButton(withTitle: "Cancel")
-        alert.addButton(withTitle: "Move to Trash").hasDestructiveAction = true
+        let hints = NSHostingView(rootView: DeletionKeyboardHints())
+        hints.setFrameSize(hints.fittingSize)
+        alert.accessoryView = hints
+        let cancel = alert.addButton(withTitle: "Cancel")
+        cancel.keyEquivalent = "\u{1b}"
+        cancel.keyEquivalentModifierMask = []
+        let trash = alert.addButton(withTitle: "Move to Trash")
+        trash.hasDestructiveAction = true
+        // NSAlert removes Return-based key equivalents from destructive buttons.
+        let monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            guard NSApp.modalWindow === alert.window, event.window === alert.window,
+                  !event.isARepeat, event.keyCode == 36 || event.keyCode == 76,
+                  event.modifierFlags.intersection([.command, .control, .option, .shift]) == .command else { return event }
+            trash.performClick(nil)
+            return nil
+        }
+        defer { if let monitor { NSEvent.removeMonitor(monitor) } }
         guard alert.runModal() == .alertSecondButtonReturn else { return }
         var failure: Error?
         do { try controller.store.moveToTrash(ids: Set(meetings.map(\.id))) }
@@ -630,13 +630,6 @@ struct LibraryView: View {
         detailFocused = false
     }
 
-    private func shortcut(_ title: String, _ keys: String) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Text(title).font(.system(size: 11))
-            Spacer(minLength: 4)
-            Text(keys).font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary).multilineTextAlignment(.trailing)
-        }
-    }
 
     private func statusColor(_ status: String) -> Color { status == "failed" ? .red : status == "waiting_for_limit" ? .orange : status == "complete" || status == "transcribed" ? .green : .secondary }
     private func meetingDate(_ value: String) -> String {
