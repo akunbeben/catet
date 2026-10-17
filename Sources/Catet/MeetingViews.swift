@@ -68,11 +68,13 @@ struct FloatingPill: View {
         HStack(spacing: 10) {
             if controller.isRecording {
                 Circle().fill(.red).frame(width: 6, height: 6)
+            } else if controller.hasActiveRecordingLifecycle {
+                ProgressView().controlSize(.small).tint(.white)
             } else {
                 Image(nsImage: CatetBrand.mark).resizable().scaledToFit().frame(width: 14, height: 14)
             }
             VStack(alignment: .leading, spacing: 2) {
-                Text(controller.isRecording ? "Recording" : "Catet")
+                Text(controller.isRecording ? "Recording" : controller.hasActiveRecordingLifecycle ? "Transcribing" : "Catet")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.white.opacity(0.65))
                 Group {
@@ -82,6 +84,9 @@ struct FloatingPill: View {
                         } else {
                             Text("00:00")
                         }
+                    } else if controller.hasActiveRecordingLifecycle {
+                        Text(controller.liveTranscriptionStatusMessage.isEmpty ? "Finishing transcript" : controller.liveTranscriptionStatusMessage)
+                            .lineLimit(1)
                     } else {
                         Text("Ready to record")
                     }
@@ -108,6 +113,10 @@ struct FloatingPill: View {
                 }
                 .help("Stop recording")
                 .accessibilityLabel("Stop recording")
+            } else if controller.hasActiveRecordingLifecycle {
+                ProgressView().controlSize(.small).tint(.white)
+                    .help(controller.liveTranscriptionStatusMessage.isEmpty ? "Finishing transcript" : controller.liveTranscriptionStatusMessage)
+                    .accessibilityLabel("Finishing transcription")
             } else {
                 Button { controller.beginRecordingFlow() } label: {
                     HStack(spacing: 5) {
@@ -653,7 +662,7 @@ struct MeetingDetail: View {
     private var hasMoM: Bool { FileManager.default.fileExists(atPath: meeting.directory.appendingPathComponent("mom.md").path) }
     private var momActionTitle: String { hasMoM ? "Regenerate notes" : "Create notes" }
     private var canCreateMoM: Bool {
-        hasTranscript && meeting.status != "transcribing" && meeting.status != "summarizing"
+        hasTranscript && meeting.status != "recording" && meeting.status != "transcribing" && meeting.status != "summarizing"
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
@@ -697,6 +706,11 @@ struct MeetingDetail: View {
                 .help("Meeting actions")
                 .accessibilityLabel("Meeting actions")
             }
+            if (meeting.status == "recording" || meeting.status == "transcribing")
+                && !controller.liveTranscriptionStatusMessage.isEmpty {
+                Label(controller.liveTranscriptionStatusMessage, systemImage: "waveform")
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
+            }
             if let message = meeting.failureMessage { failureBanner(message) }
             if let warning = meeting.capture_warning {
                 VStack(alignment: .leading, spacing: 6) {
@@ -717,7 +731,7 @@ struct MeetingDetail: View {
                 if meeting.status == "recorded" {
                     Button("Process recording") { controller.process(meeting, mom: meeting.generate_mom == true) }
                         .buttonStyle(.borderedProminent).fixedSize()
-                } else if meeting.status == "failed" && !hasTranscript {
+                } else if meeting.status == "failed" && (!hasTranscript || meeting.error_kind == "transcription") {
                     Button("Retry transcription") { controller.retryTranscription(meeting) }
                         .buttonStyle(.borderedProminent).fixedSize()
                 } else if hasTranscript && (!hasMoM || meeting.error != nil) {
@@ -739,7 +753,7 @@ struct MeetingDetail: View {
             .accessibilityIdentifier("meeting-detail-\(meeting.id)")
             .simultaneousGesture(TapGesture().onEnded { contentFocused = true })
             .task(id: OutputRequest(directory: meeting.directory, status: meeting.status)) {
-                await loadOutputs()
+                await loadOutputsWhileActive()
             }
     }
 
@@ -781,6 +795,16 @@ struct MeetingDetail: View {
     private var transcriptOutput: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 12) {
+                if outputs?.isLivePreview == true {
+                    HStack(spacing: 8) {
+                        Label("Live transcript · preview", systemImage: "waveform")
+                            .font(.system(size: 12, weight: .medium)).foregroundStyle(.secondary)
+                        Spacer()
+                        if !controller.liveTranscriptionStatusMessage.isEmpty {
+                            Text(controller.liveTranscriptionStatusMessage).font(.system(size: 11)).foregroundStyle(.secondary)
+                        }
+                    }
+                }
                 if transcriptSegments.isEmpty {
                     Text(transcript.isEmpty ? "No transcript yet." : transcript)
                         .font(.system(size: 14)).lineSpacing(5)
@@ -856,6 +880,7 @@ struct MeetingDetail: View {
         let mom: String
         let segments: [TranscriptSegment]
         let minutes: [MinutesBlock]
+        let isLivePreview: Bool
     }
     private func shortTimestamp(_ seconds: Double) -> String {
         let value = Int(seconds)
@@ -865,6 +890,13 @@ struct MeetingDetail: View {
     private func meetingDate(_ value: String) -> String {
         guard let date = ISO8601DateFormatter().date(from: value) else { return value }
         return DateFormatter.localizedString(from: date, dateStyle: .medium, timeStyle: .short)
+    }
+    @MainActor private func loadOutputsWhileActive() async {
+        repeat {
+            await loadOutputs()
+            guard meeting.status == "recording" || meeting.status == "transcribing", !Task.isCancelled else { return }
+            try? await Task.sleep(nanoseconds: 900_000_000)
+        } while !Task.isCancelled
     }
     @MainActor private func loadOutputs() async {
         let directory = meeting.directory
@@ -880,11 +912,15 @@ struct MeetingDetail: View {
 
     nonisolated private static func readOutputs(in directory: URL) throws -> LoadedOutputs {
         try Task.checkCancellation()
-        let segments = (try? JSONDecoder().decode(TranscriptDocument.self, from: Data(contentsOf: directory.appendingPathComponent("transcript.json"))))?.segments.filter {
+        let finalTranscriptExists = FileManager.default.fileExists(atPath: directory.appendingPathComponent("transcript.json").path)
+            || FileManager.default.fileExists(atPath: directory.appendingPathComponent("transcript.txt").path)
+        let transcriptName = finalTranscriptExists ? "transcript.json" : "live-transcript.json"
+        let textName = finalTranscriptExists ? "transcript.txt" : "live-transcript.txt"
+        let segments = (try? JSONDecoder().decode(TranscriptDocument.self, from: Data(contentsOf: directory.appendingPathComponent(transcriptName))))?.segments.filter {
             $0.start.isFinite && $0.start >= 0 && $0.start < Double(Int.max) && !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         } ?? []
         try Task.checkCancellation()
-        let transcript = segments.isEmpty ? (try? String(contentsOf: directory.appendingPathComponent("transcript.txt"), encoding: .utf8)) ?? "" : ""
+        let transcript = segments.isEmpty ? (try? String(contentsOf: directory.appendingPathComponent(textName), encoding: .utf8)) ?? "" : ""
         let mom = (try? String(contentsOf: directory.appendingPathComponent("mom.md"), encoding: .utf8)) ?? ""
         try Task.checkCancellation()
         var minutes: [MinutesBlock] = []
@@ -907,13 +943,14 @@ struct MeetingDetail: View {
             }
         }
         try Task.checkCancellation()
-        return LoadedOutputs(transcript: transcript, mom: mom, segments: segments, minutes: minutes)
+        return LoadedOutputs(transcript: transcript, mom: mom, segments: segments, minutes: minutes,
+                             isLivePreview: !finalTranscriptExists)
     }
 }
 
 extension CatetController {
     func beginRecordingFlow() {
-        guard !isRecording else { showLibrary(); return }
+        guard !hasActiveRecordingLifecycle && !isStoppingRecording else { showLibrary(); return }
         let preferences: RecordingPreferences
         if let saved = RecordingPreferences.load() {
             preferences = saved
@@ -926,14 +963,26 @@ extension CatetController {
         startRecording(generateMoM: preferences.createMoM, includeSystemAudio: preferences.captureSystemAudio)
     }
     func startRecording(generateMoM: Bool = false, includeSystemAudio: Bool = true) {
-        guard !isRecording else { return }
+        guard !hasActiveRecordingLifecycle && !isStoppingRecording else { return }
         didOfferMicOnly = false
         recordingFailure = nil; recordingReady = false; pendingRecordingStop = false
         processAfterRecordingStops = true
+        liveTranscriptionStatusMessage = ""
         do {
             let meeting = try store.newMeeting(title: "Meeting \(DateFormatter.catet.string(from: Date()))", generateMoM: generateMoM)
+            do { try store.reserveForLiveTranscription(meeting.id) }
+            catch {
+                let reservationError = error
+                do { try store.update(id: meeting.id) { $0.status = "failed"; $0.error = reservationError.localizedDescription } }
+                catch {
+                    refresh()
+                    throw StoreError.processing("Could not reserve this meeting for recording: \(reservationError.localizedDescription) Could not save failure state: \(error.localizedDescription)")
+                }
+                refresh()
+                throw reservationError
+            }
             meetings.insert(meeting, at: 0); currentRecordingID = meeting.id; recordingStartedAt = nil
-            recorder.start(directory: meeting.directory, includeSystemAudio: includeSystemAudio) { [weak self] result in
+            recorder.start(directory: meeting.directory, includeSystemAudio: includeSystemAudio, meetingLockHeld: true) { [weak self] result in
                 DispatchQueue.main.async {
                     guard let self, self.currentRecordingID == meeting.id else { return }
                     self.recordingReady = true

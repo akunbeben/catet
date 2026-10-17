@@ -21,7 +21,86 @@ struct AudioRegressionTests {
         }
         return buffer
     }
+    static func childSeesMeetingLock(root: URL, meetingID: String) throws -> Bool {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL
+        process.arguments = ["--check-meeting-lock", root.path, meetingID]
+        try process.run()
+        process.waitUntilExit()
+        return process.terminationStatus == 0
+    }
+    static func testLiveTranscriptionReservationLifecycle(using store: MeetingStore) throws {
+        let observer = MeetingStore()
+        let meeting = try store.newMeeting(title: "Live transcription reservation")
+        try store.reserveForLiveTranscription(meeting.id)
+        try check(observer.loadAndRecover().first { $0.id == meeting.id }?.status == "recording",
+                  "A second store must not recover an active recording")
+        try check(observer.isProcessRunning(for: meeting),
+                  "Live transcription must hold the canonical meeting lock seen by other processes")
+        let lockVisibleInChild = try childSeesMeetingLock(root: store.root, meetingID: meeting.id)
+        try check(lockVisibleInChild, "A separate process must see the canonical meeting lock")
+        var secondReservationBlocked = false
+        do {
+            try observer.reserveForLiveTranscription(meeting.id)
+        } catch is StoreError { secondReservationBlocked = true }
+        try check(secondReservationBlocked, "A second store must not reserve the same meeting")
+
+        try store.update(id: meeting.id) { $0.status = "transcribing" }
+        try check(observer.loadAndRecover().first { $0.id == meeting.id }?.status == "transcribing",
+                  "A second store must not recover an active transcription finalization")
+
+        try store.update(id: meeting.id) { $0.status = "transcribed" }
+        var engineBlocked = false
+        observer.runEngine(meeting: meeting, command: "process", transcriptOnly: true) {
+            if case .failure = $0 { engineBlocked = true }
+        }
+        try check(engineBlocked, "Another store must not start a duplicate engine worker during finalization")
+        try check(observer.isLocallyProcessing(meeting.id), "The reservation must be visible to another store instance")
+        var trashBlocked = false
+        do {
+            try observer.moveToTrash(ids: [meeting.id])
+        } catch is StoreError { trashBlocked = true }
+        try check(trashBlocked && FileManager.default.fileExists(atPath: meeting.directory.path),
+                  "Another store must not trash a reserved meeting even after its metadata changes")
+
+        store.releaseLiveTranscriptionReservation(meeting.id)
+        try check(!observer.isLocallyProcessing(meeting.id), "Releasing the reservation must release the cross-store lock")
+        try store.update(id: meeting.id) { $0.status = "transcribing" }
+        let lockReleasedInChild = try !childSeesMeetingLock(root: store.root, meetingID: meeting.id)
+        try check(lockReleasedInChild, "A separate process must see the canonical lock released after finalization")
+        let recovered = observer.loadAndRecover().first { $0.id == meeting.id }
+        try check(recovered?.status == "failed" && recovered?.failed_step == "transcribe"
+                  && recovered?.failureMessage?.contains("try again") == true,
+                  "After release, interrupted finalization must recover to an actionable retry state")
+        let completed = try store.newMeeting(title: "Live transcription completed")
+        try store.reserveForLiveTranscription(completed.id)
+        try store.update(id: completed.id) { $0.status = "transcribing" }
+        try store.update(id: completed.id) { $0.status = "transcribed"; $0.error = nil; $0.error_kind = nil }
+        store.releaseLiveTranscriptionReservation(completed.id)
+        try check(observer.meeting(id: completed.id)?.statusLabel == "Transcript ready",
+                  "Successful live finalization must leave a transcript-ready state")
+
+        let failed = try store.newMeeting(title: "Live transcription failed")
+        try store.reserveForLiveTranscription(failed.id)
+        try store.update(id: failed.id) { $0.status = "transcribing" }
+        try store.update(id: failed.id) {
+            $0.status = "failed"; $0.error = "Model unavailable"; $0.error_kind = "transcription"
+        }
+        store.releaseLiveTranscriptionReservation(failed.id)
+        let failedMeeting = observer.meeting(id: failed.id)
+        try check(failedMeeting?.status == "failed"
+                  && failedMeeting?.failureMessage?.contains("Retry transcription") == true,
+                  "Live transcription failure must remain failed and offer an actionable retry")
+        print("PASS: Live transcription reservations block recovery, duplicate workers and trash until finalization")
+    }
+
     static func main() throws {
+        if CommandLine.arguments.count == 4, CommandLine.arguments[1] == "--check-meeting-lock" {
+            setenv("CATET_MEETINGS_ROOT", CommandLine.arguments[2], 1)
+            let store = MeetingStore()
+            guard let meeting = store.meeting(id: CommandLine.arguments[3]) else { _exit(2) }
+            _exit(store.isProcessRunning(for: meeting) ? 0 : 1)
+        }
         if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--write-and-crash" {
             let input = buffer()
             let writer = try WaveWriter(url: URL(fileURLWithPath: CommandLine.arguments[2]), source: input.format)
@@ -61,6 +140,7 @@ struct AudioRegressionTests {
         setenv("CATET_MEETINGS_ROOT", root.appendingPathComponent("meetings").path, 1)
         let store = MeetingStore()
         try store.createRoot()
+        try testLiveTranscriptionReservationLifecycle(using: store)
         let meeting = try store.newMeeting(title: "Recovery")
         let metadataURL = meeting.directory.appendingPathComponent("meeting.json")
         var metadata = try JSONSerialization.jsonObject(with: Data(contentsOf: metadataURL)) as! [String: Any]
@@ -95,10 +175,10 @@ struct AudioRegressionTests {
         let unrelated = CaptureIssue(source: .systemAudio, error: NSError(domain: NSCocoaErrorDomain, code: SCStreamError.Code.userDeclined.rawValue))
         try check(denied.permissionDenied && !invalidConfig.permissionDenied && !unrelated.permissionDenied, "Only ScreenCaptureKit authorization denial should be treated as a permission failure")
         try store.update(id: meeting.id) { $0.capture_warning = denied.warning }
-        try store.saveRecording(id: meeting.id, failure: nil)
+        try store.update(id: meeting.id) { $0.status = "recorded"; $0.error = nil }
         let saved = store.meeting(id: meeting.id)!
         try check(saved.status == "recorded" && saved.error == nil && saved.capture_warning != nil, "System audio failure must leave saved microphone recording available, with a separate warning")
-        try store.saveRecording(id: meeting.id, failure: "Disk full")
+        try store.update(id: meeting.id) { $0.status = "failed"; $0.error = "Disk full" }
         let failedCapture = store.meeting(id: meeting.id)!
         try check(failedCapture.status == "failed" && failedCapture.error == "Disk full" && failedCapture.capture_warning != nil, "Real recording write errors must still fail and preserve the partial capture warning")
         print("PASS: Permission classification and partial capture recovery preserve truthful state")
@@ -110,7 +190,7 @@ struct AudioRegressionTests {
         let shortAudio = try WaveWriter(url: short.directory.appendingPathComponent("microphone.wav"), source: source.format)
         try shortAudio.pad(to: 48_000)
         try shortAudio.finish()
-        try store.saveRecording(id: short.id, failure: nil)
+        try store.update(id: short.id) { $0.status = "recorded"; $0.error = nil }
         try check(store.recordingDuration(for: short) == 3, "Duration must use finalized audio frames")
         let longerChannel = try WaveWriter(url: short.directory.appendingPathComponent("system.wav"), source: source.format)
         try longerChannel.pad(to: 64_000)

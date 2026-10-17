@@ -9,3 +9,5 @@ xcrun swiftc -parse-as-library -swift-version 5 -target arm64-apple-macosx14.0 "
 "$WORK/audio-tests"
 xcrun swiftc -parse-as-library -swift-version 5 -target arm64-apple-macosx14.0 "$ROOT"/Sources/Shared/*.swift "$ROOT"/tests/CodexAccountsTests.swift -o "$WORK/account-tests"
 "$WORK/account-tests"
+xcrun swiftc -parse-as-library -swift-version 5 -target arm64-apple-macosx14.0 "$ROOT"/Sources/Catet/LiveTranscriptionSupport.swift "$ROOT"/tests/LiveTranscriptionTests.swift -o "$WORK/live-transcription-tests" -framework AVFoundation
+"$WORK/live-transcription-tests"

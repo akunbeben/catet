@@ -2,3 +2,5 @@
 build/
 runtime.json
 .DS_Store
+.build/
+.swiftpm/

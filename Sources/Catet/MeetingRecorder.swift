@@ -26,21 +26,23 @@ final class MeetingRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @unchec
     private var startHostTime: Double?
     private var recordingLockFD: Int32 = -1
 
-    func start(directory: URL, includeSystemAudio: Bool = true, completion: @escaping (Result<Void, Error>) -> Void) {
+    func start(directory: URL, includeSystemAudio: Bool = true, meetingLockHeld: Bool = false, completion: @escaping (Result<Void, Error>) -> Void) {
         let token = UUID()
         do {
             try stateLock.withLock {
                 guard stopped, recordingLockFD < 0 else { throw AudioError.capture("A recording is already active.") }
-                let locks = directory.deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("runtime/locks")
-                try FileManager.default.createDirectory(at: locks, withIntermediateDirectories: true)
-                let path = locks.appendingPathComponent(directory.lastPathComponent + ".lock").path
-                let fd = open(path, O_RDWR | O_CREAT, S_IRUSR | S_IWUSR)
-                guard fd >= 0 else { throw AudioError.capture("Could not create the recording lock.") }
-                guard catetFlock(fd, LOCK_EX | LOCK_NB) == 0 else { close(fd); throw AudioError.capture("This meeting is already being processed.") }
-                var pid = "\(getpid())\n"
-                _ = ftruncate(fd, 0)
-                _ = pid.withUTF8 { Darwin.write(fd, $0.baseAddress, $0.count) }
-                recordingLockFD = fd
+                if !meetingLockHeld {
+                    let locks = directory.deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("runtime/locks")
+                    try FileManager.default.createDirectory(at: locks, withIntermediateDirectories: true)
+                    let path = locks.appendingPathComponent(directory.lastPathComponent + ".lock").path
+                    let fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, S_IRUSR | S_IWUSR)
+                    guard fd >= 0 else { throw AudioError.capture("Could not create the recording lock.") }
+                    guard catetFlock(fd, LOCK_EX | LOCK_NB) == 0 else { close(fd); throw AudioError.capture("This meeting is already being processed.") }
+                    var pid = "\(getpid())\n"
+                    _ = ftruncate(fd, 0)
+                    _ = pid.withUTF8 { Darwin.write(fd, $0.baseAddress, $0.count) }
+                    recordingLockFD = fd
+                }
                 self.directory = directory; generation = token; stopped = false; systemFailed = false; startHostTime = nil
             }
         } catch { completion(.failure(error)); return }

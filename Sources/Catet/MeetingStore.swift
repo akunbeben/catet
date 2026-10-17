@@ -54,7 +54,7 @@ struct Meeting: Identifiable, Codable, Equatable {
         if isUsageLimited { return "This Codex account has reached its usage limit." }
         switch error_kind {
         case "authentication": return "Sign in to Codex again to create meeting notes."
-        case "transcription": return "The recording could not be transcribed. Your audio is still saved."
+        case "transcription": return "The recording could not be transcribed. Your audio is still saved. Choose Retry transcription to try again."
         case "interrupted": return "Processing stopped before it finished. You can try again."
         default:
             if failed_step == "mom" || error.contains("Codex") {
@@ -65,6 +65,8 @@ struct Meeting: Identifiable, Codable, Equatable {
     }
     var statusLabel: String {
         switch status {
+        case "recording": return "Recording"
+        case "transcribing": return "Transcribing"
         case "waiting_for_limit": return "Waiting for Codex"
         case "transcribed": return "Transcript ready"
         case "summarizing": return "Creating notes"
@@ -80,6 +82,8 @@ final class MeetingStore {
     private let lock = NSLock()
     private var activeProcessIDs = Set<String>()
     private var activeProcesses: [String: Process] = [:]
+    private var reservedMeetingIDs = Set<String>()
+    private var reservedMeetingLocks: [String: Int32] = [:]
     init() {
         if let path = ProcessInfo.processInfo.environment["CATET_MEETINGS_ROOT"], !path.isEmpty {
             root = URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL
@@ -88,6 +92,36 @@ final class MeetingStore {
         }
     }
     func createRoot() throws { try fm.createDirectory(at: root, withIntermediateDirectories: true) }
+    func reserveForLiveTranscription(_ meetingID: String) throws {
+        lock.lock(); defer { lock.unlock() }
+        guard !activeProcessIDs.contains(meetingID), !reservedMeetingIDs.contains(meetingID),
+              let meeting = loadAll().first(where: { $0.id == meetingID }),
+              !isProcessRunning(for: meeting) else {
+            throw StoreError.processing("This meeting is already being processed or recorded.")
+        }
+        let locks = root.deletingLastPathComponent().appendingPathComponent("runtime/locks", isDirectory: true)
+        try fm.createDirectory(at: locks, withIntermediateDirectories: true)
+        let descriptor = open(locks.appendingPathComponent("\(meetingID).lock").path, O_CREAT | O_RDWR | O_CLOEXEC, S_IRUSR | S_IWUSR)
+        guard descriptor >= 0 else { throw StoreError.processing("Could not reserve this meeting for transcription.") }
+        guard catetFlock(descriptor, LOCK_EX | LOCK_NB) == 0 else {
+            close(descriptor)
+            throw StoreError.processing("This meeting is already being processed or recorded.")
+        }
+        var pid = "\(getpid())\n"
+        _ = ftruncate(descriptor, 0)
+        _ = pid.withUTF8 { Darwin.write(descriptor, $0.baseAddress, $0.count) }
+        reservedMeetingIDs.insert(meetingID)
+        reservedMeetingLocks[meetingID] = descriptor
+    }
+    func releaseLiveTranscriptionReservation(_ meetingID: String) {
+        lock.lock()
+        reservedMeetingIDs.remove(meetingID)
+        if let descriptor = reservedMeetingLocks.removeValue(forKey: meetingID) {
+            _ = catetFlock(descriptor, LOCK_UN)
+            close(descriptor)
+        }
+        lock.unlock()
+    }
     func meeting(id: String) -> Meeting? { loadAll().first { $0.id == id } }
     func newMeeting(title: String, generateMoM: Bool = false) throws -> Meeting {
         let id = UUID().uuidString.lowercased(), dir = root.appendingPathComponent(id, isDirectory: true)
@@ -108,15 +142,17 @@ final class MeetingStore {
         for i in all.indices {
             let status = all[i].status
             if status == "recording" {
-                if isLocallyProcessing(all[i].id) || isProcessRunning(for: all[i]) { continue }
+                if isLocallyProcessing(all[i].id) { continue }
                 all[i].status = "recorded"
                 if !fm.fileExists(atPath: all[i].directory.appendingPathComponent("microphone.wav").path) && !fm.fileExists(atPath: all[i].directory.appendingPathComponent("system.wav").path) {
                     all[i].error = "The app stopped before audio was finalized. No complete recording is available."
                 } else { all[i].error = "Catet restarted during recording. Available audio was preserved; retry transcription to continue." }
                 do { try persist(all[i]) } catch { all[i].error = "Could not save recovery state: \(error.localizedDescription)" }
             } else if status == "transcribing" || status == "summarizing" {
-                if !isLocallyProcessing(all[i].id) && !isProcessRunning(for: all[i]) {
+                if !isLocallyProcessing(all[i].id) {
                     all[i].status = "failed"; all[i].error = "Processing stopped before it completed. Retry the action to continue."
+                    all[i].error_kind = "interrupted"; all[i].failed_step = status == "transcribing" ? "transcribe" : "mom"
+                    all[i].retry_at = nil
                     do { try persist(all[i]) } catch { all[i].error = "Could not save recovery state: \(error.localizedDescription)" }
                 }
             }
@@ -128,12 +164,6 @@ final class MeetingStore {
         guard var m = loadAll().first(where: { $0.id == id }) else { throw StoreError.configuration("Meeting metadata is unavailable.") }
         let dir = root.appendingPathComponent(id, isDirectory: true); m.directory = dir; change(&m)
         try write(m, in: dir)
-    }
-    func saveRecording(id: String, failure: String?) throws {
-        try update(id: id) {
-            $0.status = failure == nil ? "recorded" : "failed"
-            $0.error = failure
-        }
     }
     func recordingDuration(for meeting: Meeting) -> TimeInterval? {
         ["microphone.wav", "system.wav"].compactMap { name -> TimeInterval? in
@@ -162,7 +192,7 @@ final class MeetingStore {
             guard directory.lastPathComponent == id, directory.deletingLastPathComponent() == root else {
                 throw StoreError.configuration("The meeting is outside the meeting library. Nothing was moved to Trash.")
             }
-            guard !activeProcessIDs.contains(id) else {
+            guard !activeProcessIDs.contains(id), !reservedMeetingIDs.contains(id) else {
                 throw StoreError.processing("A selected meeting is still being processed. Wait for it to finish, then try again. Nothing was moved to Trash.")
             }
             let descriptor = open(locks.appendingPathComponent("\(id).lock").path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
@@ -203,7 +233,10 @@ final class MeetingStore {
         try data.write(to: path, options: .atomic)
     }
     func isProcessRunning(for meeting: Meeting) -> Bool {
-        let lockURL = root.deletingLastPathComponent().appendingPathComponent("runtime/locks/\(meeting.id).lock")
+        isMeetingLockHeld(meeting.id)
+    }
+    private func isMeetingLockHeld(_ meetingID: String) -> Bool {
+        let lockURL = root.deletingLastPathComponent().appendingPathComponent("runtime/locks/\(meetingID).lock")
         let descriptor = open(lockURL.path, O_RDONLY)
         guard descriptor >= 0 else { return false }
         defer { close(descriptor) }
@@ -212,7 +245,7 @@ final class MeetingStore {
     }
     func isLocallyProcessing(_ meetingID: String) -> Bool {
         lock.lock(); defer { lock.unlock() }
-        return activeProcessIDs.contains(meetingID)
+        return activeProcessIDs.contains(meetingID) || reservedMeetingIDs.contains(meetingID) || isMeetingLockHeld(meetingID)
     }
     func runEngine(meeting: Meeting, command: String, transcriptOnly: Bool, accountID: String? = nil, completion: @escaping (Result<Void, Error>) -> Void) {
         let requestedAccountID: String?
@@ -223,7 +256,7 @@ final class MeetingStore {
             } else { requestedAccountID = nil }
         } catch { completion(.failure(error)); return }
         lock.lock()
-        guard !activeProcessIDs.contains(meeting.id), !isProcessRunning(for: meeting) else {
+        guard !activeProcessIDs.contains(meeting.id), !reservedMeetingIDs.contains(meeting.id), !isProcessRunning(for: meeting) else {
             lock.unlock()
             completion(.failure(StoreError.processing("This meeting is already being processed or recorded.")))
             return

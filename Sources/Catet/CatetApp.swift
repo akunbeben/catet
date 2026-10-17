@@ -12,6 +12,7 @@ struct CatetApp: App {
     var body: some Scene { Settings { EmptyView() } }
 }
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var controller: CatetController!
     private var statusItem: NSStatusItem!
@@ -125,13 +126,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        if controller.isRecording {
+        if controller.hasActiveRecordingLifecycle {
             let alert = NSAlert(); alert.messageText = "Save this recording before quitting?"
-            alert.informativeText = "Catet will stop and save the audio files before it quits."
+            alert.informativeText = "Catet will stop the recording and finish transcription before it quits."
             alert.addButton(withTitle: "Save and Quit"); alert.addButton(withTitle: "Keep Catet Open")
             guard alert.runModal() == .alertFirstButtonReturn else { return .terminateCancel }
             controller.quitAfterRecordingStops = true
-            controller.stopRecording()
+            if controller.isRecording { controller.stopRecording() }
             return .terminateLater
         }
         if controller.runningMeetingCount > 0 {
@@ -154,14 +155,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func quit() { NSApp.terminate(nil) }
 }
 
+@MainActor
 final class CatetController: ObservableObject {
     @Published var meetings: [Meeting] = []
     @Published var currentRecordingID: String?
     @Published var recordingStartedAt: Date?
-    var isRecording: Bool { currentRecordingID != nil }
+    var isRecording: Bool { currentRecordingID != nil && !isStoppingRecording }
+    var hasActiveRecordingLifecycle: Bool { currentRecordingID != nil }
     @Published var micAvailable = false
     @Published var systemAudioAvailable = false
     @Published var statusMessage = ""
+    @Published var liveTranscriptionStatusMessage = ""
     @Published var quickRecordingKeyboardActive = false
     @Published var quickRecordingShortcutAvailable = false
     @Published private(set) var pillExpanded = false
@@ -183,6 +187,10 @@ final class CatetController: ObservableObject {
     var runningMeetingCount: Int { meetings.filter { store.isLocallyProcessing($0.id) || store.isProcessRunning(for: $0) }.count }
     var didOfferMicOnly = false
     var processAfterRecordingStops = true
+    private var liveTranscription: LiveTranscription?
+    private var liveTranscriptionMeetingID: String?
+    private var liveTranscriptionStartTask: Task<Void, Never>?
+    private var liveTranscriptionMonitorTask: Task<Void, Never>?
 
     func startup() {
         do { try store.createRoot() } catch { reportError(error) }
@@ -191,7 +199,10 @@ final class CatetController: ObservableObject {
         recorder.onState = { [weak self] mic, system, message in
             guard let self, self.isRecording, !self.isStoppingRecording else { return }
             self.micAvailable = mic; self.systemAudioAvailable = system; self.statusMessage = message
-            if mic && self.recordingStartedAt == nil { self.recordingStartedAt = Date() }
+            if mic {
+                if self.recordingStartedAt == nil { self.recordingStartedAt = Date() }
+                if let id = self.currentRecordingID { self.startLiveTranscription(for: id) }
+            }
         }
         recorder.onIssue = { [weak self] issue in
             guard let self, let id = self.currentRecordingID, !self.isStoppingRecording else { return }
@@ -212,6 +223,36 @@ final class CatetController: ObservableObject {
         retryScheduledNotes()
         scheduleRefresh()
     }
+    private func startLiveTranscription(for meetingID: String) {
+        guard liveTranscriptionMeetingID == nil else { return }
+        guard let meeting = store.meeting(id: meetingID), currentRecordingID == meetingID else { return }
+        let session = LiveTranscription(directory: meeting.directory)
+        liveTranscription = session
+        liveTranscriptionMeetingID = meetingID
+        let startTask = Task { await session.start() }
+        liveTranscriptionStartTask = startTask
+        liveTranscriptionStatusMessage = "Starting transcription"
+        liveTranscriptionMonitorTask = Task { [weak self] in
+            await startTask.value
+            while !Task.isCancelled {
+                let status = await session.status
+                let message: String
+                switch status {
+                case .idle: message = "Starting transcription"
+                case .preparingModel: message = "Preparing transcription model"
+                case .transcribing: message = "Transcribing live audio"
+                case .ready: message = "Listening for speech"
+                case .failed(_): message = "Transcription is unavailable. Keep recording and retry after stopping."
+                case .cancelled: message = ""
+                }
+                DispatchQueue.main.async {
+                    guard let self, self.liveTranscriptionMeetingID == meetingID else { return }
+                    self.liveTranscriptionStatusMessage = message
+                }
+                try? await Task.sleep(nanoseconds: 700_000_000)
+            }
+        }
+    }
     func refresh() {
         let updated = store.loadAndRecover()
         if meetings != updated { meetings = updated }
@@ -230,7 +271,9 @@ final class CatetController: ObservableObject {
                 interval = min(interval, retry.timeIntervalSince(now))
             }
         }
-        let timer = Timer(timeInterval: max(0.1, interval), repeats: false) { [weak self] _ in self?.refresh() }
+        let timer = Timer(timeInterval: max(0.1, interval), repeats: false) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.refresh() }
+        }
         timer.tolerance = min(interval * 0.1, 0.5)
         RunLoop.main.add(timer, forMode: .common)
         refreshTimer = timer
@@ -345,37 +388,155 @@ final class CatetController: ObservableObject {
         guard !isStoppingRecording, let id = currentRecordingID, let meeting = store.meeting(id: id) else { return }
         guard recordingReady else { pendingRecordingStop = true; return }
         isStoppingRecording = true
+        do {
+            try store.update(id: id) {
+                $0.status = "transcribing"; $0.error = nil; $0.error_kind = nil; $0.failed_step = nil; $0.retry_at = nil
+            }
+        } catch { recordingFailure = error.localizedDescription }
+        refresh()
         recorder.stop { [weak self] result in
-            guard let self else { return }
+            guard let self, self.currentRecordingID == id else { return }
             var failure = self.recordingFailure
             if case .failure(let error) = result { failure = error.localizedDescription }
-            do {
-                try self.store.saveRecording(id: id, failure: failure)
-            } catch { failure = error.localizedDescription }
+            self.recordingFailure = nil
             DispatchQueue.main.async {
-                self.currentRecordingID = nil; self.recordingStartedAt = nil
+                self.recordingStartedAt = nil
                 self.micAvailable = false; self.systemAudioAvailable = false
-                self.isStoppingRecording = false; self.recordingFailure = nil
-                self.recordingReady = false; self.pendingRecordingStop = false; self.refresh()
-                if let failure { self.reportError(StoreError.processing(failure)) }
-                else if self.keepShortRecording(meeting), !self.quitAfterRecordingStops && self.processAfterRecordingStops {
-                    self.process(meeting, mom: meeting.generate_mom == true)
+                self.recordingReady = false; self.pendingRecordingStop = false
+                if failure == nil && !self.quitAfterRecordingStops && !self.keepShortRecording(meeting) {
+                    self.discardRecording(meeting)
+                    return
                 }
-                if self.quitAfterRecordingStops { NSApp.reply(toApplicationShouldTerminate: true) }
+                self.finishRecording(meeting, captureFailure: failure)
             }
         }
     }
     private func keepShortRecording(_ meeting: Meeting) -> Bool {
         guard let dialog = ShortRecordingDialog(duration: store.recordingDuration(for: meeting)) else { return true }
         NSApp.activate(ignoringOtherApps: true)
-        guard dialog.alert.runModal() == .alertSecondButtonReturn else { return true }
-        do {
-            try store.moveToTrash(ids: [meeting.id], onlyUnprocessedRecordings: true)
-            refresh()
-        } catch {
-            reportError(error)
+        return dialog.alert.runModal() != .alertSecondButtonReturn
+    }
+    private func finishRecording(_ meeting: Meeting, captureFailure: String?) {
+        let id = meeting.id
+        let session = liveTranscriptionMeetingID == id ? liveTranscription : nil
+        let startTask = liveTranscriptionMeetingID == id ? liveTranscriptionStartTask : nil
+        let store = self.store
+        Task {
+            await startTask?.value
+            if let captureFailure {
+                await session?.cancel()
+                var failureForUser = captureFailure
+                do {
+                    try store.update(id: id) {
+                        $0.status = "failed"; $0.error = captureFailure; $0.error_kind = nil
+                        $0.failed_step = nil; $0.retry_at = nil
+                    }
+                } catch {
+                    failureForUser = "Catet could not save the failure state for this recording. Your audio is still saved. \(error.localizedDescription)"
+                }
+                store.releaseLiveTranscriptionReservation(id)
+                DispatchQueue.main.async { self.completeRecordingLifecycle(meeting, failure: StoreError.processing(failureForUser)) }
+                return
+            }
+            do {
+                guard let session else {
+                    throw StoreError.processing("Live transcription did not start. Your audio is still saved. Choose Retry transcription to try again.")
+                }
+                try await session.finish()
+            } catch {
+                let diagnosticMessage = "Live transcription could not finish. Your audio is still saved. \(error.localizedDescription) Retry transcription from the meeting details."
+                var failureForUser = "Live transcription could not finish. Your audio is still saved. Choose Retry transcription from the meeting details."
+                do {
+                    try store.update(id: id) {
+                        $0.status = "failed"; $0.error = diagnosticMessage; $0.error_kind = "transcription"
+                        $0.failed_step = "transcribe"; $0.retry_at = nil
+                    }
+                } catch {
+                    failureForUser = "Live transcription could not finish. Your audio is still saved, but Catet could not save the failure state. \(error.localizedDescription) Open the meeting folder to inspect diagnostics."
+                }
+                store.releaseLiveTranscriptionReservation(id)
+                DispatchQueue.main.async { self.completeRecordingLifecycle(meeting, failure: StoreError.processing(failureForUser)) }
+                return
+            }
+            do {
+                try store.update(id: id) {
+                    $0.status = "transcribed"; $0.error = nil; $0.error_kind = nil
+                    $0.failed_step = nil; $0.retry_at = nil
+                }
+            } catch {
+                let diagnosticMessage = "The transcript is complete, but Catet could not save its ready state. Your audio and transcript are saved. \(error.localizedDescription)"
+                var failureForUser = "The transcript and audio are saved, but Catet could not save its ready state. Choose Retry transcription from the meeting details."
+                do {
+                    try store.update(id: id) {
+                        $0.status = "failed"; $0.error = diagnosticMessage; $0.error_kind = "transcription"
+                        $0.failed_step = "transcribe"; $0.retry_at = nil
+                    }
+                } catch {
+                    failureForUser = "The transcript and audio are saved, but Catet could not save the meeting state. \(error.localizedDescription) Open the meeting folder to inspect diagnostics."
+                }
+                store.releaseLiveTranscriptionReservation(id)
+                DispatchQueue.main.async { self.completeRecordingLifecycle(meeting, failure: StoreError.processing(failureForUser)) }
+                return
+            }
+            store.releaseLiveTranscriptionReservation(id)
+            DispatchQueue.main.async { self.completeRecordingLifecycle(meeting, failure: nil) }
         }
-        return false
+    }
+    private func discardRecording(_ meeting: Meeting) {
+        let id = meeting.id
+        let session = liveTranscriptionMeetingID == id ? liveTranscription : nil
+        let startTask = liveTranscriptionMeetingID == id ? liveTranscriptionStartTask : nil
+        let store = self.store
+        Task {
+            await startTask?.value
+            await session?.cancel()
+            var failure: Error?
+            do {
+                try store.update(id: id) {
+                    $0.status = "recorded"; $0.error = nil; $0.error_kind = nil
+                    $0.failed_step = nil; $0.retry_at = nil
+                }
+            } catch { failure = error }
+            store.releaseLiveTranscriptionReservation(id)
+            DispatchQueue.main.async {
+                self.clearLiveTranscription(for: id)
+                if let failure { self.reportError(failure) }
+                else {
+                    do { try store.moveToTrash(ids: [id], onlyUnprocessedRecordings: true) }
+                    catch { self.reportError(error) }
+                }
+                self.completeRecordingUI()
+                self.replyToQuitIfNeeded()
+            }
+        }
+    }
+    private func completeRecordingLifecycle(_ meeting: Meeting, failure: Error?) {
+        clearLiveTranscription(for: meeting.id)
+        completeRecordingUI()
+        if let failure {
+            if !quitAfterRecordingStops { reportError(failure) }
+        } else if processAfterRecordingStops && !quitAfterRecordingStops {
+            process(meeting, mom: meeting.generate_mom == true)
+        }
+        replyToQuitIfNeeded()
+    }
+    private func replyToQuitIfNeeded() {
+        guard quitAfterRecordingStops else { return }
+        quitAfterRecordingStops = false
+        NSApp.reply(toApplicationShouldTerminate: true)
+    }
+    private func completeRecordingUI() {
+        currentRecordingID = nil; recordingStartedAt = nil
+        micAvailable = false; systemAudioAvailable = false
+        isStoppingRecording = false; recordingFailure = nil
+        recordingReady = false; pendingRecordingStop = false
+        refresh()
+    }
+    private func clearLiveTranscription(for meetingID: String) {
+        guard liveTranscriptionMeetingID == meetingID else { return }
+        liveTranscriptionMonitorTask?.cancel(); liveTranscriptionMonitorTask = nil
+        liveTranscription = nil; liveTranscriptionMeetingID = nil; liveTranscriptionStartTask = nil
+        liveTranscriptionStatusMessage = ""
     }
     func process(_ meeting: Meeting, mom: Bool) {
         guard !store.isLocallyProcessing(meeting.id), !store.isProcessRunning(for: meeting) else { return }

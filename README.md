@@ -1,6 +1,6 @@
 # Catet
 
-A native Swift macOS meeting recorder. Audio is transcribed locally with whisper.cpp. Meeting notes are generated through Codex CLI using your ChatGPT subscription. No paid API key or Python runtime is required.
+A native Swift macOS meeting recorder. WhisperKit transcribes audio locally while you record. Imported audio and transcription retries use whisper.cpp. Meeting notes are generated through Codex CLI using your ChatGPT subscription. No paid API key or Python runtime is required.
 
 ## Setup
 
@@ -11,7 +11,7 @@ Requires an Apple Silicon Mac running macOS 14 or later, Apple's command-line to
 ./catet open
 ```
 
-Setup downloads the runtime, a checksum-verified multilingual Whisper model (574 MB), and a local speech detector (885 KB). It installs Catet in `/Applications`, registers it with macOS, and opens its permission settings. Runtime dependencies are pinned under `~/Library/Application Support/Catet/runtime`, independently of this checkout. Downloads require internet. Transcription works offline after setup.
+Setup downloads the runtime, a checksum-verified multilingual Whisper model (574 MB), and a local speech detector (885 KB). It installs Catet in `/Applications`, registers it with macOS, and opens its permission settings. Runtime dependencies are pinned under `~/Library/Application Support/Catet/runtime`, independently of this checkout. The first recording also downloads WhisperKit's multilingual streaming model and tokenizer to `~/Library/Application Support/Catet/models`. Keep an internet connection during this preparation. Later recordings use the cached model offline.
 
 ## Record a meeting
 
@@ -21,7 +21,7 @@ Recording choices are saved after the first confirmation. Later recordings start
 
 If system audio access is denied, choose **Open Settings and stop**, allow Catet under **Privacy & Security → Screen & System Audio Recording**, then reopen Catet and start a new recording. **Stop and save** keeps the available microphone recording without sending it to Codex. Use **Process recording** in the library when you want to process it. Missing system audio remains visible as a separate warning.
 
-Start recording after participants agree to be recorded. Stop when the meeting ends. Very short recordings offer **Keep** or **Move to Trash** before processing starts. Trashed recordings can be restored from macOS Trash. Open the meeting library to read the transcript and meeting notes, retry failed processing, or open the meeting's files. Existing audio files can also be imported.
+Start recording after participants agree to be recorded. The meeting library shows a transcript preview that updates during recording. Recent text can change as more audio arrives. Stop when the meeting ends. Catet finishes the remaining audio before creating meeting notes. Very short recordings offer **Keep** or **Move to Trash**. Trashed recordings can be restored from macOS Trash. Use the library to retry failed processing or open the meeting's files. Existing audio files can also be imported.
 
 Audio and transcripts are stored under `~/Library/Application Support/Catet/meetings`. Do not delete these files while a recording or processing job is running. Recordings are kept after processing so failures can be retried.
 

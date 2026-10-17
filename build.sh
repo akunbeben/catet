@@ -7,7 +7,9 @@ APP="$ROOT/build/Catet.app"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 xcrun swift scripts/make-icon.swift "$APP/Contents/Resources/Catet.icns"
 xcrun swiftc -parse-as-library -swift-version 5 -O -target arm64-apple-macosx14.0 -module-name CatetEngine Sources/Shared/*.swift Sources/CatetEngine/*.swift -o "$APP/Contents/MacOS/CatetEngine"
-xcrun swiftc -parse-as-library -swift-version 5 -O -target arm64-apple-macosx14.0 -module-name Catet Sources/Shared/*.swift Sources/Catet/*.swift -o "$APP/Contents/MacOS/Catet" -framework AppKit -framework SwiftUI -framework AVFoundation -framework ScreenCaptureKit -framework CoreMedia -framework AudioToolbox -framework Carbon
+xcrun swift build -c release --product Catet --arch arm64 --scratch-path "$ROOT/build/swift"
+SWIFT_BIN="$(xcrun swift build -c release --arch arm64 --scratch-path "$ROOT/build/swift" --show-bin-path)"
+cp "$SWIFT_BIN/Catet" "$APP/Contents/MacOS/Catet"
 cp runtime.json "$APP/Contents/Resources/"
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
