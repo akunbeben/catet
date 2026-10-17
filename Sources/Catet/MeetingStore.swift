@@ -82,7 +82,6 @@ final class MeetingStore {
     private let lock = NSLock()
     private var activeProcessIDs = Set<String>()
     private var activeProcesses: [String: Process] = [:]
-    private var reservedMeetingIDs = Set<String>()
     private var reservedMeetingLocks: [String: Int32] = [:]
     init() {
         if let path = ProcessInfo.processInfo.environment["CATET_MEETINGS_ROOT"], !path.isEmpty {
@@ -94,7 +93,7 @@ final class MeetingStore {
     func createRoot() throws { try fm.createDirectory(at: root, withIntermediateDirectories: true) }
     func reserveForLiveTranscription(_ meetingID: String) throws {
         lock.lock(); defer { lock.unlock() }
-        guard !activeProcessIDs.contains(meetingID), !reservedMeetingIDs.contains(meetingID),
+        guard !activeProcessIDs.contains(meetingID), reservedMeetingLocks[meetingID] == nil,
               let meeting = loadAll().first(where: { $0.id == meetingID }),
               !isProcessRunning(for: meeting) else {
             throw StoreError.processing("This meeting is already being processed or recorded.")
@@ -110,12 +109,10 @@ final class MeetingStore {
         var pid = "\(getpid())\n"
         _ = ftruncate(descriptor, 0)
         _ = pid.withUTF8 { Darwin.write(descriptor, $0.baseAddress, $0.count) }
-        reservedMeetingIDs.insert(meetingID)
         reservedMeetingLocks[meetingID] = descriptor
     }
     func releaseLiveTranscriptionReservation(_ meetingID: String) {
         lock.lock()
-        reservedMeetingIDs.remove(meetingID)
         if let descriptor = reservedMeetingLocks.removeValue(forKey: meetingID) {
             _ = catetFlock(descriptor, LOCK_UN)
             close(descriptor)
@@ -230,7 +227,7 @@ final class MeetingStore {
             guard directory.lastPathComponent == id, directory.deletingLastPathComponent() == root else {
                 throw StoreError.configuration("The meeting is outside the meeting library. Nothing was moved to Trash.")
             }
-            guard !activeProcessIDs.contains(id), !reservedMeetingIDs.contains(id) else {
+            guard !activeProcessIDs.contains(id), reservedMeetingLocks[id] == nil else {
                 throw StoreError.processing("A selected meeting is still being processed. Wait for it to finish, then try again. Nothing was moved to Trash.")
             }
             let descriptor = open(locks.appendingPathComponent("\(id).lock").path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
@@ -301,7 +298,7 @@ final class MeetingStore {
     }
     func isLocallyProcessing(_ meetingID: String) -> Bool {
         lock.lock(); defer { lock.unlock() }
-        return activeProcessIDs.contains(meetingID) || reservedMeetingIDs.contains(meetingID) || isMeetingLockHeld(meetingID)
+        return activeProcessIDs.contains(meetingID) || reservedMeetingLocks[meetingID] != nil || isMeetingLockHeld(meetingID)
     }
     func runEngine(meeting: Meeting, command: String, transcriptOnly: Bool, accountID: String? = nil, completion: @escaping (Result<Void, Error>) -> Void) {
         let requestedAccountID: String?
@@ -312,7 +309,7 @@ final class MeetingStore {
             } else { requestedAccountID = nil }
         } catch { completion(.failure(error)); return }
         lock.lock()
-        guard !activeProcessIDs.contains(meeting.id), !reservedMeetingIDs.contains(meeting.id), !isProcessRunning(for: meeting) else {
+        guard !activeProcessIDs.contains(meeting.id), reservedMeetingLocks[meeting.id] == nil, !isProcessRunning(for: meeting) else {
             lock.unlock()
             completion(.failure(StoreError.processing("This meeting is already being processed or recorded.")))
             return

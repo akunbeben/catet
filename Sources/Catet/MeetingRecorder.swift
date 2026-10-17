@@ -6,7 +6,7 @@ import AudioToolbox
 import CoreMedia
 
 final class MeetingRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
-    var onState: ((Bool, Bool, String) -> Void)?
+    var onState: ((Bool, Bool) -> Void)?
     var onIssue: ((CaptureIssue) -> Void)?
     // All mutable capture state is protected by stateLock, including buffer writes.
     private let stateLock = NSLock()
@@ -53,11 +53,11 @@ final class MeetingRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @unchec
                 guard stateLock.withLock({ generation == token && !stopped }) else { return }
                 try lifecycle.sync { try startMicrophone(directory: directory, token: token) }
                 if !includeSystemAudio {
-                    emit("Microphone-only recording. System audio is disabled.")
+                    emit()
                     completion(.success(()))
                     return
                 }
-                emit("Microphone is recording. Waiting for system audio access.")
+                emit()
                 do { try await startSystemCapture(directory: directory, token: token) }
                 catch {
                     guard stateLock.withLock({ generation == token && !stopped }) else { return }
@@ -67,7 +67,7 @@ final class MeetingRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @unchec
                     return
                 }
                 guard stateLock.withLock({ generation == token && !stopped }) else { return }
-                emit("Microphone and system audio are being recorded.")
+                emit()
                 completion(.success(()))
             } catch {
                 guard stateLock.withLock({ generation == token && !stopped }) else { return }
@@ -216,13 +216,13 @@ final class MeetingRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @unchec
                 guard written == data.count, fsync(fd) == 0 else { throw AudioError.capture("Could not finish saving capture diagnostics.") }
             } catch { fputs("Catet: \(error.localizedDescription)\n", stderr) }
         }
-        emit(issue.source == .microphone ? "Microphone recording stopped." : issue.warning)
+        emit()
         DispatchQueue.main.async { [weak self] in self?.onIssue?(issue) }
     }
 
-    private func emit(_ message: String) {
+    private func emit() {
         let state = stateLock.withLock { (micRunning, systemRunning) }
-        DispatchQueue.main.async { [weak self] in self?.onState?(state.0, state.1, message) }
+        DispatchQueue.main.async { [weak self] in self?.onState?(state.0, state.1) }
     }
 }
 

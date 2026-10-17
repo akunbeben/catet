@@ -18,8 +18,7 @@ extension CatetController {
             if codexAccounts != accounts || cooldownExpired { codexAccounts = accounts }
             if selectedCodexAccountID != selectedID { selectedCodexAccountID = selectedID }
         } catch {
-            let message = "Codex accounts could not be loaded. Open account settings to try again."
-            if statusMessage != message { statusMessage = message }
+            fputs("catet: could not load Codex accounts: \(error.localizedDescription)\n", stderr)
         }
     }
 
@@ -73,7 +72,7 @@ extension CatetController {
                             $0.error = "The scheduled retry could not start. Try creating notes again."
                             $0.retry_at = nil
                         }
-                    } catch { self.statusMessage = "The retry state could not be saved. Open the meeting folder for diagnostics." }
+                    } catch { fputs("catet: could not save the scheduled retry state: \(error.localizedDescription)\n", stderr) }
                 }
                 self.refresh()
             }

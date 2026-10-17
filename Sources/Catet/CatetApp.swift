@@ -168,7 +168,6 @@ final class CatetController: ObservableObject {
     var hasActiveRecordingLifecycle: Bool { currentRecordingID != nil }
     @Published var micAvailable = false
     @Published var systemAudioAvailable = false
-    @Published var statusMessage = ""
     @Published var liveTranscriptionStatusMessage = ""
     @Published var quickRecordingKeyboardActive = false
     @Published var quickRecordingShortcutAvailable = false
@@ -208,9 +207,9 @@ final class CatetController: ObservableObject {
         meetings = store.loadAndRecover()
         drainHooks()
         refreshCodexAccounts()
-        recorder.onState = { [weak self] mic, system, message in
+        recorder.onState = { [weak self] mic, system in
             guard let self, self.isRecording, !self.isStoppingRecording else { return }
-            self.micAvailable = mic; self.systemAudioAvailable = system; self.statusMessage = message
+            self.micAvailable = mic; self.systemAudioAvailable = system
             if mic {
                 if self.recordingStartedAt == nil { self.recordingStartedAt = Date() }
                 if let id = self.currentRecordingID { self.startLiveTranscription(for: id) }
@@ -292,7 +291,6 @@ final class CatetController: ObservableObject {
         refreshTimer = timer
     }
     func reportError(_ error: Error) {
-        statusMessage = error.localizedDescription
         let alert = NSAlert()
         alert.messageText = "Catet could not complete this action"
         alert.informativeText = error.localizedDescription
@@ -302,9 +300,7 @@ final class CatetController: ObservableObject {
     func offerMicOnlyChoice(_ issue: CaptureIssue) {
         let alert = SystemAudioRecoveryDialog(issue: issue).alert
         let choice = alert.runModal()
-        if choice == .alertFirstButtonReturn {
-            statusMessage = issue.warning
-        } else {
+        if choice != .alertFirstButtonReturn {
             processAfterRecordingStops = false
             stopRecording()
             if choice == .alertThirdButtonReturn { openAudioSettings() }

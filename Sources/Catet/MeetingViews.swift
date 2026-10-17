@@ -981,7 +981,6 @@ extension CatetController {
                     self.recordingReady = true
                     if case .failure(let error) = result {
                         self.recordingFailure = error.localizedDescription
-                        self.statusMessage = error.localizedDescription
                     }
                     if self.pendingRecordingStop || self.recordingFailure != nil { self.stopRecording() }
                 }
