@@ -226,11 +226,29 @@ final class MeetingStore {
     private func write(_ m: Meeting, in dir: URL) throws {
         let path = dir.appendingPathComponent("meeting.json")
         var existing = (try? JSONSerialization.jsonObject(with: Data(contentsOf: path))) as? [String: Any] ?? [:]
+        let oldStatus = existing["status"] as? String
         let encoded = try JSONSerialization.jsonObject(with: JSONEncoder.pretty.encode(m)) as! [String: Any]
         for key in ["error", "capture_warning", "generate_mom", "error_kind", "retry_at", "codex_account_id", "failed_step"] { existing.removeValue(forKey: key) }
         existing.merge(encoded) { _, new in new }
         let data = try JSONSerialization.data(withJSONObject: existing, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: path, options: .atomic)
+        let newStatus = encoded["status"] as? String
+        guard oldStatus != newStatus, let newStatus else { return }
+        let event: String?
+        switch newStatus {
+        case "transcribed": event = "transcript.ready"
+        case "complete": event = "notes.ready"
+        case "failed", "waiting_for_limit": event = "processing.failed"
+        default: event = nil
+        }
+        guard let event else { return }
+        var details: [String: Any] = [:]
+        if let step = encoded["failed_step"] as? String { details["step"] = step }
+        if let kind = encoded["error_kind"] as? String { details["kind"] = kind }
+        if let message = encoded["error"] as? String { details["message"] = message }
+        if let retryAt = encoded["retry_at"] as? String { details["retry_at"] = retryAt }
+        do { try MeetingHooks.enqueue(event: event, directory: dir, metadata: ["failure": details]) }
+        catch { fputs("catet: could not queue \(event) hook: \(error)\n", stderr) }
     }
     func isProcessRunning(for meeting: Meeting) -> Bool {
         isMeetingLockHeld(meeting.id)

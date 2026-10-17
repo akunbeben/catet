@@ -488,6 +488,27 @@ struct EngineRegressionTests {
                     retried["codex_account_id"] as? String == alpha.account.id &&
                     finalRows.last?.first == alphaSnapshot.home?.path,
                     "Scheduled recovery must complete in the original account context")
+        let hookRoot = temp.appendingPathComponent("hook-meetings")
+        let hookMeeting = try makeMeeting(root: hookRoot, status: "transcribed", speech: speech)
+        let hookReceiver = temp.appendingPathComponent("hook-receiver")
+        let hookScript = temp.appendingPathComponent("hook-command")
+        try """
+        #!/bin/sh
+        cat >> '\(hookReceiver.path)'
+        exit 1
+        """.write(to: hookScript, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: hookScript.path)
+        let hookConfig: [String: Any] = ["command": [hookScript.path], "events": ["notes.ready"]]
+        try JSONSerialization.data(withJSONObject: hookConfig).write(to: temp.appendingPathComponent("hooks.json"))
+        _ = try updateStatus(in: hookMeeting, status: "complete")
+        _ = try updateStatus(in: hookMeeting, status: "complete")
+        do { try MeetingHooks.deliverPending(root: hookRoot) } catch { }
+        let hookStatuses = try MeetingHooks.status(root: hookRoot)
+        try require(hookStatuses.count == 1 && hookStatuses.first?["event"] as? String == "notes.ready",
+                    "Repeated unchanged status must not duplicate the notes.ready event")
+        try require(try readMetadata(from: hookMeeting)["status"] as? String == "complete",
+                    "A command delivery failure must not change successful meeting status")
+        print("PASS: Persisted hook transitions enqueue once and delivery failure preserves meeting success")
         print("PASS: Due-checked retry-notes uses meeting account and honors cooldown")
         print("PASS: Contextual title publication and invalid regeneration preserve prior results")
         print("All native engine regressions passed.")

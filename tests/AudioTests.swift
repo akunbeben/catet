@@ -253,6 +253,22 @@ struct AudioRegressionTests {
         } catch is StoreError { }
         try check(FileManager.default.fileExists(atPath: outside.path), "Refused deletion must preserve the external directory")
         print("PASS: Library deletion cannot follow symlinks outside the meeting root")
+        let recoveryHook = root.appendingPathComponent("recovery-hook")
+        try """
+        #!/bin/sh
+        cat >/dev/null
+        """.write(to: recoveryHook, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: recoveryHook.path)
+        try JSONSerialization.data(withJSONObject: [
+            "command": [recoveryHook.path], "events": ["processing.failed"]
+        ]).write(to: root.appendingPathComponent("hooks.json"))
+        let interrupted = try store.newMeeting(title: "Interrupted recovery hook")
+        try store.update(id: interrupted.id) { $0.status = "transcribing" }
+        _ = store.loadAndRecover()
+        _ = store.loadAndRecover()
+        let recoveryEvents = try MeetingHooks.status(root: store.root).filter { $0["event"] as? String == "processing.failed" }
+        try check(recoveryEvents.count == 1 && store.meeting(id: interrupted.id)?.status == "failed",
+                  "Interrupted processing recovery must enqueue one failure event across repeated refreshes")
         print("All native audio regressions passed.")
     }
 }

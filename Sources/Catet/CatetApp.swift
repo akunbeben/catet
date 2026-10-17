@@ -195,10 +195,18 @@ final class CatetController: ObservableObject {
     private var liveTranscriptionMeetingID: String?
     private var liveTranscriptionStartTask: Task<Void, Never>?
     private var liveTranscriptionMonitorTask: Task<Void, Never>?
-
+    private let hookQueue = DispatchQueue(label: "catet.hooks.delivery", qos: .utility)
+    private func drainHooks() {
+        let root = store.root
+        hookQueue.async {
+            do { try MeetingHooks.deliverPending(root: root) }
+            catch { fputs("catet: could not deliver command hooks: \(error)\n", stderr) }
+        }
+    }
     func startup() {
         do { try store.createRoot() } catch { reportError(error) }
         meetings = store.loadAndRecover()
+        drainHooks()
         refreshCodexAccounts()
         recorder.onState = { [weak self] mic, system, message in
             guard let self, self.isRecording, !self.isStoppingRecording else { return }
@@ -260,6 +268,7 @@ final class CatetController: ObservableObject {
     func refresh() {
         let updated = store.loadAndRecover()
         if meetings != updated { meetings = updated }
+        drainHooks()
         refreshCodexAccounts()
         retryScheduledNotes()
         scheduleRefresh()
@@ -410,6 +419,12 @@ final class CatetController: ObservableObject {
                 if failure == nil && !self.quitAfterRecordingStops && !self.keepShortRecording(meeting) {
                     self.discardRecording(meeting)
                     return
+                }
+                if failure == nil {
+                    do {
+                        try MeetingHooks.enqueue(event: "recording.saved", directory: meeting.directory, metadata: [:])
+                        self.drainHooks()
+                    } catch { fputs("catet: could not queue recording.saved hook: \(error)\n", stderr) }
                 }
                 self.finishRecording(meeting, captureFailure: failure)
             }

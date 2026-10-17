@@ -11,3 +11,5 @@ xcrun swiftc -parse-as-library -swift-version 5 -target arm64-apple-macosx14.0 "
 "$WORK/account-tests"
 xcrun swiftc -parse-as-library -swift-version 5 -target arm64-apple-macosx14.0 "$ROOT"/Sources/Catet/LiveTranscriptionSupport.swift "$ROOT"/tests/LiveTranscriptionTests.swift -o "$WORK/live-transcription-tests" -framework AVFoundation
 "$WORK/live-transcription-tests"
+xcrun swiftc -parse-as-library -swift-version 5 -target arm64-apple-macosx14.0 "$ROOT"/Sources/Shared/MeetingHooks.swift "$ROOT"/tests/HookTests.swift -o "$WORK/hook-tests"
+"$WORK/hook-tests"

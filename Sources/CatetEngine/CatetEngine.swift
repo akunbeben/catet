@@ -98,9 +98,26 @@ func writeMetadata(_ metadata: [String: Any], to directory: URL) throws {
 @discardableResult
 func updateStatus(in directory: URL, status: String, values: [String: Any] = [:]) throws -> [String: Any] {
     var metadata = try readMetadata(from: directory)
+    let previousStatus = metadata["status"] as? String
     metadata["status"] = status
     for (key, value) in values { metadata[key] = value }
     try writeMetadata(metadata, to: directory)
+    let event: String?
+    switch status {
+    case "transcribed": event = "transcript.ready"
+    case "complete": event = "notes.ready"
+    case "failed", "waiting_for_limit": event = "processing.failed"
+    default: event = nil
+    }
+    if previousStatus != status, let event {
+        var details: [String: Any] = [:]
+        if let step = metadata["failed_step"] as? String { details["step"] = step }
+        if let kind = metadata["error_kind"] as? String { details["kind"] = kind }
+        if let message = metadata["error"] as? String { details["message"] = message }
+        if let retryAt = metadata["retry_at"] as? String { details["retry_at"] = retryAt }
+        do { try MeetingHooks.enqueue(event: event, directory: directory, metadata: ["failure": details]) }
+        catch { fputs("catet: could not queue \(event) hook: \(error)\n", stderr) }
+    }
     return metadata
 }
 
@@ -547,6 +564,8 @@ func importAudio(_ audio: URL, title: String?, root: URL) throws -> URL {
             "status": "recorded"
         ]
         try writeMetadata(metadata, to: directory)
+        do { try MeetingHooks.enqueue(event: "recording.saved", directory: directory, metadata: [:]) }
+        catch { fputs("catet: could not queue recording.saved hook: \(error)\n", stderr) }
         return directory
     } catch {
         try? FileManager.default.removeItem(at: directory)
@@ -1195,6 +1214,8 @@ Commands:
   retry-notes DIRECTORY      Retry due notes with their original account
   mom DIRECTORY              Create meeting notes with Codex
   show DIRECTORY [--mom]
+  hooks list                Show command-hook delivery state as JSON
+  hooks retry               Retry failed command hooks and deliver pending events
 
 Meeting notes are opt-in (--mom). The default storage location is ~/Library/Application Support/Catet/meetings.
 """
@@ -1306,11 +1327,28 @@ struct CatetEngineMain {
                     Darwin.exit(usageError("invalid show arguments"))
                 }
                 try showMeeting(expandPath(directories[0]), withMom: rest.contains("--mom"))
+            case "hooks":
+                let rest = Array(args.command.dropFirst())
+                guard rest.count == 1, rest[0] == "list" || rest[0] == "retry" else {
+                    Darwin.exit(usageError("hooks requires list or retry"))
+                }
+                if rest[0] == "list" {
+                    print(try jsonString(MeetingHooks.status(root: args.root)))
+                } else {
+                    try MeetingHooks.retryFailed(root: args.root)
+                    try MeetingHooks.deliverPending(root: args.root)
+                }
             default:
                 Darwin.exit(usageError("invalid choice: '\(command)'"))
             }
+            if !["list", "show"].contains(command) && !(command == "hooks" && args.command.dropFirst().first == "list") {
+                do { try MeetingHooks.deliverPending(root: args.root) }
+                catch { fputs("catet: could not deliver command hooks: \(error)\n", stderr) }
+            }
             if caughtSignal != 0 { Darwin.exit(1) }
         } catch {
+            do { try MeetingHooks.deliverPending(root: args.root) }
+            catch { fputs("catet: could not deliver command hooks: \(error)\n", stderr) }
             fputs("catet: \(error)\n", stderr)
             Darwin.exit(1)
         }
