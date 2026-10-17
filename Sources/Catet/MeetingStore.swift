@@ -122,6 +122,44 @@ final class MeetingStore {
         }
         lock.unlock()
     }
+    /// Live failures are provisional until one full pass over the saved audio has failed.
+    func finishTranscription(
+        meeting: Meeting,
+        finishLive: () async throws -> Void,
+        cancelLive: () async -> Void
+    ) async throws {
+        defer { releaseLiveTranscriptionReservation(meeting.id) }
+        do {
+            try await finishLive()
+        } catch {
+            fputs("catet: live transcription failed; retrying saved audio: \(error.localizedDescription)\n", stderr)
+            await cancelLive()
+            // A failed publication may have left only one final output. Never let the
+            // engine mistake it for a complete transcript and skip the saved audio.
+            for name in ["transcript.json", "transcript.txt", "live-transcript.json", "live-transcript.txt"] {
+                let path = meeting.directory.appendingPathComponent(name)
+                do { try fm.removeItem(at: path) }
+                catch let error as NSError where error.domain == NSCocoaErrorDomain && error.code == NSFileNoSuchFileError { }
+            }
+            try update(id: meeting.id) {
+                $0.status = "recorded"; $0.error = nil; $0.error_kind = nil
+                $0.failed_step = nil; $0.retry_at = nil
+            }
+            // The engine takes the canonical lock itself. Keep the recording UI
+            // active until its completion, including when the user is quitting.
+            releaseLiveTranscriptionReservation(meeting.id)
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                runEngine(meeting: meeting, command: "process", transcriptOnly: true) {
+                    continuation.resume(with: $0)
+                }
+            }
+            return
+        }
+        try update(id: meeting.id) {
+            $0.status = "transcribed"; $0.error = nil; $0.error_kind = nil
+            $0.failed_step = nil; $0.retry_at = nil
+        }
+    }
     func meeting(id: String) -> Meeting? { loadAll().first { $0.id == id } }
     func newMeeting(title: String, generateMoM: Bool = false) throws -> Meeting {
         let id = UUID().uuidString.lowercased(), dir = root.appendingPathComponent(id, isDirectory: true)

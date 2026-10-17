@@ -13,3 +13,6 @@ xcrun swiftc -parse-as-library -swift-version 5 -target arm64-apple-macosx14.0 "
 "$WORK/live-transcription-tests"
 xcrun swiftc -parse-as-library -swift-version 5 -target arm64-apple-macosx14.0 "$ROOT"/Sources/Shared/MeetingHooks.swift "$ROOT"/tests/HookTests.swift -o "$WORK/hook-tests"
 "$WORK/hook-tests"
+xcrun swiftc -parse-as-library -swift-version 5 -target arm64-apple-macosx14.0 "$ROOT"/Sources/Shared/*.swift "$ROOT"/Sources/CatetEngine/*.swift -o "$WORK/CatetEngine"
+xcrun swiftc -parse-as-library -swift-version 5 -target arm64-apple-macosx14.0 "$ROOT"/Sources/Shared/*.swift "$ROOT"/Sources/Catet/MeetingStore.swift "$ROOT"/tests/RecordingFinalizationTests.swift -o "$WORK/recording-finalization-tests" -framework AppKit -framework AVFoundation
+"$WORK/recording-finalization-tests"

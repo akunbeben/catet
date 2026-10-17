@@ -254,7 +254,7 @@ final class CatetController: ObservableObject {
                 case .preparingModel: message = "Preparing transcription model"
                 case .transcribing: message = "Transcribing live audio"
                 case .ready: message = "Listening for speech"
-                case .failed(_): message = "Transcription is unavailable. Keep recording and retry after stopping."
+                case .failed(_): message = "Live transcription paused. Catet will transcribe after recording stops."
                 case .cancelled: message = ""
                 }
                 DispatchQueue.main.async {
@@ -457,48 +457,35 @@ final class CatetController: ObservableObject {
                 DispatchQueue.main.async { self.completeRecordingLifecycle(meeting, failure: StoreError.processing(failureForUser)) }
                 return
             }
+            liveTranscriptionMonitorTask?.cancel()
+            liveTranscriptionMonitorTask = nil
+            liveTranscriptionStatusMessage = "Finishing transcript"
             do {
-                guard let session else {
-                    throw StoreError.processing("Live transcription did not start. Your audio is still saved. Choose Retry transcription to try again.")
-                }
-                try await session.finish()
+                try await store.finishTranscription(meeting: meeting, finishLive: {
+                    guard let session else {
+                        throw StoreError.processing("Live transcription did not start.")
+                    }
+                    try await session.finish()
+                }, cancelLive: {
+                    self.liveTranscriptionStatusMessage = "Transcribing saved audio"
+                    await session?.cancel()
+                })
             } catch {
-                let diagnosticMessage = "Live transcription could not finish. Your audio is still saved. \(error.localizedDescription) Retry transcription from the meeting details."
-                var failureForUser = "Live transcription could not finish. Your audio is still saved. Choose Retry transcription from the meeting details."
+                var failureForUser = "The recording could not be transcribed. Your audio is still saved. Choose Retry transcription to try again."
                 do {
                     try store.update(id: id) {
-                        $0.status = "failed"; $0.error = diagnosticMessage; $0.error_kind = "transcription"
-                        $0.failed_step = "transcribe"; $0.retry_at = nil
+                        // Preserve the engine's final failure and diagnostic details.
+                        guard $0.status != "failed" else { return }
+                        $0.status = "failed"; $0.error = error.localizedDescription
+                        $0.error_kind = "transcription"; $0.failed_step = "transcribe"; $0.retry_at = nil
                     }
                 } catch {
-                    failureForUser = "Live transcription could not finish. Your audio is still saved, but Catet could not save the failure state. \(error.localizedDescription) Open the meeting folder to inspect diagnostics."
+                    failureForUser = "Catet could not save the transcription state. Your audio is still saved. \(error.localizedDescription)"
                 }
-                store.releaseLiveTranscriptionReservation(id)
-                DispatchQueue.main.async { self.completeRecordingLifecycle(meeting, failure: StoreError.processing(failureForUser)) }
+                self.completeRecordingLifecycle(meeting, failure: StoreError.processing(failureForUser))
                 return
             }
-            do {
-                try store.update(id: id) {
-                    $0.status = "transcribed"; $0.error = nil; $0.error_kind = nil
-                    $0.failed_step = nil; $0.retry_at = nil
-                }
-            } catch {
-                let diagnosticMessage = "The transcript is complete, but Catet could not save its ready state. Your audio and transcript are saved. \(error.localizedDescription)"
-                var failureForUser = "The transcript and audio are saved, but Catet could not save its ready state. Choose Retry transcription from the meeting details."
-                do {
-                    try store.update(id: id) {
-                        $0.status = "failed"; $0.error = diagnosticMessage; $0.error_kind = "transcription"
-                        $0.failed_step = "transcribe"; $0.retry_at = nil
-                    }
-                } catch {
-                    failureForUser = "The transcript and audio are saved, but Catet could not save the meeting state. \(error.localizedDescription) Open the meeting folder to inspect diagnostics."
-                }
-                store.releaseLiveTranscriptionReservation(id)
-                DispatchQueue.main.async { self.completeRecordingLifecycle(meeting, failure: StoreError.processing(failureForUser)) }
-                return
-            }
-            store.releaseLiveTranscriptionReservation(id)
-            DispatchQueue.main.async { self.completeRecordingLifecycle(meeting, failure: nil) }
+            self.completeRecordingLifecycle(meeting, failure: nil)
         }
     }
     private func discardRecording(_ meeting: Meeting) {
