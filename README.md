@@ -2,6 +2,10 @@
 
 A native macOS meeting recorder with live local transcription and meeting notes through Codex.
 
+![Catet on macOS showing meeting notes, decisions, and action items](Assets/catet-showcase.png)
+
+*Actual app UI with demo meeting data.*
+
 ## Setup
 
 Requires Apple Silicon, macOS 14+, Apple’s command-line tools, Nix, Codex CLI signed in with ChatGPT (`codex login`), and a valid code-signing identity in your login Keychain.
