@@ -4,7 +4,7 @@ import AVFoundation
 @_silgen_name("flock")
 func catetFlock(_ descriptor: Int32, _ operation: Int32) -> Int32
 
-struct Meeting: Identifiable, Codable {
+struct Meeting: Identifiable, Codable, Equatable {
     var id: String
     var title: String
     var created_at: String
@@ -144,33 +144,53 @@ final class MeetingStore {
     }
 
     @discardableResult
-    func discardRecording(id: String) throws -> URL? {
+    func moveToTrash(ids: Set<String>, onlyUnprocessedRecordings: Bool = false) throws -> [URL] {
         lock.lock(); defer { lock.unlock() }
-        guard !activeProcessIDs.contains(id), let meeting = loadAll().first(where: { $0.id == id }),
-              meeting.status == "recorded" else {
-            throw StoreError.processing("Only a saved, unprocessed recording can be moved to Trash.")
-        }
-        let directory = meeting.directory.standardizedFileURL.resolvingSymlinksInPath()
-        guard directory.lastPathComponent == id,
-              directory.deletingLastPathComponent() == root.standardizedFileURL.resolvingSymlinksInPath() else {
-            throw StoreError.configuration("The recording is outside the meeting library.")
-        }
-        let locks = root.deletingLastPathComponent().appendingPathComponent("runtime/locks", isDirectory: true)
+        let root = self.root.standardizedFileURL.resolvingSymlinksInPath()
+        let locks = self.root.deletingLastPathComponent().appendingPathComponent("runtime/locks", isDirectory: true)
         try fm.createDirectory(at: locks, withIntermediateDirectories: true)
-        let descriptor = open(locks.appendingPathComponent("\(id).lock").path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
-        guard descriptor >= 0 else { throw StoreError.processing("Could not check whether the recording is in use.") }
-        defer { close(descriptor) }
-        guard catetFlock(descriptor, LOCK_EX | LOCK_NB) == 0 else {
-            throw StoreError.processing("This recording is still in use. Stop recording or processing before discarding it.")
+        var descriptors: [Int32] = []
+        defer {
+            for descriptor in descriptors {
+                _ = catetFlock(descriptor, LOCK_UN)
+                close(descriptor)
+            }
         }
-        defer { _ = catetFlock(descriptor, LOCK_UN) }
-        let current = try JSONDecoder().decode(Meeting.self, from: Data(contentsOf: directory.appendingPathComponent("meeting.json")))
-        guard current.id == id, current.status == "recorded" else {
-            throw StoreError.processing("The recording changed before it could be discarded. It was kept.")
+        var directories: [URL] = []
+        for id in ids {
+            let directory = root.appendingPathComponent(id, isDirectory: true).standardizedFileURL.resolvingSymlinksInPath()
+            guard directory.lastPathComponent == id, directory.deletingLastPathComponent() == root else {
+                throw StoreError.configuration("The meeting is outside the meeting library. Nothing was moved to Trash.")
+            }
+            guard !activeProcessIDs.contains(id) else {
+                throw StoreError.processing("A selected meeting is still being processed. Wait for it to finish, then try again. Nothing was moved to Trash.")
+            }
+            let descriptor = open(locks.appendingPathComponent("\(id).lock").path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
+            guard descriptor >= 0 else { throw StoreError.processing("Could not check whether a selected meeting is in use. Nothing was moved to Trash.") }
+            guard catetFlock(descriptor, LOCK_EX | LOCK_NB) == 0 else {
+                close(descriptor)
+                throw StoreError.processing("A selected meeting is still in use. Stop recording or wait for processing to finish, then try again. Nothing was moved to Trash.")
+            }
+            descriptors.append(descriptor)
+            let current = try JSONDecoder().decode(Meeting.self, from: Data(contentsOf: directory.appendingPathComponent("meeting.json")))
+            guard current.id == id,
+                  !["recording", "transcribing", "summarizing"].contains(current.status),
+                  !onlyUnprocessedRecordings || current.status == "recorded" else {
+                throw StoreError.processing("A selected meeting changed or is still recording or processing. Refresh the library and try again. Nothing was moved to Trash.")
+            }
+            directories.append(directory)
         }
-        var trashedURL: NSURL?
-        try fm.trashItem(at: directory, resultingItemURL: &trashedURL)
-        return trashedURL as URL?
+        var trashed: [URL] = []
+        for directory in directories {
+            do {
+                var url: NSURL?
+                try fm.trashItem(at: directory, resultingItemURL: &url)
+                if let url { trashed.append(url as URL) }
+            } catch {
+                throw StoreError.processing("Could not move every selected meeting to Trash. Meetings already moved can be restored from Trash. \(error.localizedDescription)")
+            }
+        }
+        return trashed
     }
     private func persist(_ m: Meeting) throws { try write(m, in: m.directory) }
     private func write(_ m: Meeting, in dir: URL) throws {

@@ -122,18 +122,57 @@ struct AudioRegressionTests {
         let descriptor = open(lockDirectory.appendingPathComponent("\(short.id).lock").path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
         try check(descriptor >= 0 && catetFlock(descriptor, LOCK_EX | LOCK_NB) == 0, "Fixture must own the recording lock")
         do {
-            try store.discardRecording(id: short.id)
+            try store.moveToTrash(ids: [short.id], onlyUnprocessedRecordings: true)
             throw AudioTestFailure(message: "An active recording must never be discarded")
         } catch is StoreError { }
         try check(FileManager.default.fileExists(atPath: short.directory.path), "Refused discard must preserve the recording")
         _ = catetFlock(descriptor, LOCK_UN)
         close(descriptor)
-        let trashed = try store.discardRecording(id: short.id)
+        let trashed = try store.moveToTrash(ids: [short.id], onlyUnprocessedRecordings: true).first
         defer { if let trashed { try? FileManager.default.removeItem(at: trashed) } }
         try check(!FileManager.default.fileExists(atPath: short.directory.path), "Discard must remove the recording from the library")
         try check(trashed != nil && FileManager.default.fileExists(atPath: trashed!.appendingPathComponent("microphone.wav").path), "Discard must preserve recoverable audio in Trash")
         try check(store.meeting(id: meeting.id) != nil, "Discard must leave other recordings untouched")
         print("PASS: Short-duration boundaries, channel duration, active-recording protection and recoverable discard")
+
+        let complete = try store.newMeeting(title: "Completed meeting")
+        let waitingForNotes = try store.newMeeting(title: "Waiting for notes")
+        try store.update(id: complete.id) { $0.status = "complete" }
+        try store.update(id: waitingForNotes.id) { $0.status = "waiting_for_limit" }
+        try "Saved transcript".write(to: complete.directory.appendingPathComponent("transcript.txt"), atomically: true, encoding: .utf8)
+        try "Saved notes".write(to: complete.directory.appendingPathComponent("mom.md"), atomically: true, encoding: .utf8)
+        let batchLock = open(lockDirectory.appendingPathComponent("\(waitingForNotes.id).lock").path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
+        try check(batchLock >= 0 && catetFlock(batchLock, LOCK_EX | LOCK_NB) == 0, "Fixture must own a batch member's processing lock")
+        do {
+            try store.moveToTrash(ids: [complete.id, waitingForNotes.id])
+            throw AudioTestFailure(message: "A batch containing an active meeting must be refused")
+        } catch is StoreError { }
+        try check(store.meeting(id: complete.id) != nil && store.meeting(id: waitingForNotes.id) != nil, "A blocked batch must keep every selected meeting")
+        _ = catetFlock(batchLock, LOCK_UN)
+        close(batchLock)
+        do {
+            try store.moveToTrash(ids: [complete.id], onlyUnprocessedRecordings: true)
+            throw AudioTestFailure(message: "Short-recording discard must reject a completed meeting")
+        } catch is StoreError { }
+        let batchTrash = try store.moveToTrash(ids: [complete.id, waitingForNotes.id])
+        defer { for url in batchTrash { try? FileManager.default.removeItem(at: url) } }
+        try check(store.meeting(id: complete.id) == nil && store.meeting(id: waitingForNotes.id) == nil, "Confirmed batch deletion must remove every selected meeting from the library")
+        let completedTrash = batchTrash.first { $0.lastPathComponent == complete.id }!
+        try check(try String(contentsOf: completedTrash.appendingPathComponent("transcript.txt"), encoding: .utf8) == "Saved transcript", "Trash must preserve the meeting transcript")
+        try check(try String(contentsOf: completedTrash.appendingPathComponent("mom.md"), encoding: .utf8) == "Saved notes", "Trash must preserve meeting notes")
+        try check(store.meeting(id: meeting.id) != nil, "Batch deletion must preserve unselected meetings")
+        print("PASS: Batch deletion preserves recoverable outputs, refuses active members, and protects unselected meetings")
+
+        let outside = root.appendingPathComponent("outside")
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        let linked = store.root.appendingPathComponent("linked")
+        try FileManager.default.createSymbolicLink(at: linked, withDestinationURL: outside)
+        do {
+            try store.moveToTrash(ids: ["linked"])
+            throw AudioTestFailure(message: "A symlink outside the library must never be trashed")
+        } catch is StoreError { }
+        try check(FileManager.default.fileExists(atPath: outside.path), "Refused deletion must preserve the external directory")
+        print("PASS: Library deletion cannot follow symlinks outside the meeting root")
         print("All native audio regressions passed.")
     }
 }

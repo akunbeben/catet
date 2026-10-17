@@ -17,23 +17,22 @@ struct FloatingPill: View {
     @ObservedObject var controller: CatetController
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ViewState private var hovered = false
-    @ViewState private var elapsed: TimeInterval = 0
     @ViewState private var collapseTask: Task<Void, Never>?
-    private let tick = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
-    private var expanded: Bool { hovered || controller.isRecording || controller.quickRecordingKeyboardActive }
     private var transitionAnimation: Animation? { reduceMotion ? nil : .easeInOut(duration: Self.animationDuration) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             ZStack(alignment: .leading) {
-                if expanded {
+                if controller.pillExpanded {
                     controls
                         .frame(width: Self.expandedWidth - Self.hoverPadding, height: Self.surfaceHeight)
                         .transition(.opacity)
                 } else {
-                    Capsule().fill(.white.opacity(0.45))
-                        .frame(width: 3, height: 22)
+                    Capsule().fill(controller.isRecording ? Color.red : Color.white.opacity(0.45))
+                        .frame(width: controller.isRecording ? 4 : 3, height: 22)
                         .frame(width: Self.collapsedWidth - Self.hoverPadding, height: Self.surfaceHeight)
+                        .accessibilityLabel(controller.isRecording ? "Recording in progress" : "Catet")
+                        .help(controller.isRecording ? "Recording in progress" : "Catet")
                         .transition(.opacity)
                 }
             }
@@ -42,7 +41,7 @@ struct FloatingPill: View {
             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(.white.opacity(0.10), lineWidth: 0.5))
             .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-            if controller.quickRecordingKeyboardActive {
+            if controller.pillExpanded && controller.quickRecordingKeyboardActive {
                 QuickRecordingKeyboardHints(recording: controller.isRecording)
                     .frame(height: 24)
                     .padding(.horizontal, 8)
@@ -54,16 +53,14 @@ struct FloatingPill: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .contentShape(Rectangle())
         .preferredColorScheme(.dark)
-        .animation(transitionAnimation, value: expanded)
+        .animation(transitionAnimation, value: controller.pillExpanded)
         .animation(transitionAnimation, value: controller.isRecording)
         .animation(transitionAnimation, value: controller.quickRecordingKeyboardActive)
         .onHover(perform: updateHover)
-        .onReceive(tick) { _ in if controller.isRecording { updateElapsed() } }
-        .onChange(of: controller.isRecording) { _, _ in
-            updateElapsed()
-            controller.setPillExpanded(expanded)
+        .onChange(of: controller.isRecording) { _, _ in controller.setPillExpanded(hovered) }
+        .onChange(of: controller.quickRecordingKeyboardActive) { _, active in
+            if !active || controller.isRecording { controller.setPillExpanded(hovered) }
         }
-        .onChange(of: controller.quickRecordingKeyboardActive) { _, _ in controller.setPillExpanded(expanded) }
         .onDisappear { collapseTask?.cancel() }
     }
 
@@ -78,7 +75,17 @@ struct FloatingPill: View {
                 Text(controller.isRecording ? "Recording" : "Catet")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.white.opacity(0.65))
-                Text(controller.isRecording ? timeText : "Ready to record")
+                Group {
+                    if controller.isRecording {
+                        if let startedAt = controller.recordingStartedAt {
+                            RecordingElapsedTime(startedAt: startedAt)
+                        } else {
+                            Text("00:00")
+                        }
+                    } else {
+                        Text("Ready to record")
+                    }
+                }
                     .font(.system(size: 12, weight: .semibold, design: controller.isRecording ? .monospaced : .default))
                     .monospacedDigit()
                     .foregroundStyle(.white)
@@ -148,15 +155,22 @@ struct FloatingPill: View {
                 try? await Task.sleep(for: .milliseconds(450))
                 guard !Task.isCancelled else { return }
                 hovered = false
-                controller.setPillExpanded(expanded)
+                controller.setPillExpanded(false)
             }
         }
     }
 
-    private func updateElapsed() {
-        elapsed = controller.recordingStartedAt.map { Date().timeIntervalSince($0) } ?? 0
+}
+
+private struct RecordingElapsedTime: View {
+    let startedAt: Date
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            let elapsed = max(0, Int(context.date.timeIntervalSince(startedAt)))
+            Text(String(format: "%02d:%02d", elapsed / 60, elapsed % 60))
+        }
     }
-    private var timeText: String { String(format: "%02d:%02d", Int(elapsed) / 60, Int(elapsed) % 60) }
 }
 
 private struct LibraryKeyMonitor: NSViewRepresentable {
@@ -238,6 +252,7 @@ private struct ScrollViewCapture: NSViewRepresentable {
 struct LibraryView: View {
     @ObservedObject var controller: CatetController
     @ViewState private var selection: String?
+    @ViewState private var markedMeetingIDs: Set<String> = []
     @ViewState private var tab = 0
     @ViewState private var searchText = ""
     @ViewState private var searchActive = false
@@ -302,36 +317,50 @@ struct LibraryView: View {
                     ScrollView {
                         LazyVStack(spacing: 3) {
                             ForEach(filteredMeetings) { meeting in
-                                Button {
-                                    select(meeting, proxy: proxy)
-                                } label: {
-                                    VStack(alignment: .leading, spacing: 8) {
-                                        Text(meeting.title).font(.system(size: 13, weight: .semibold)).lineLimit(2).help(meeting.title)
-                                        HStack {
-                                            Text(meetingDate(meeting.created_at)).lineLimit(1)
-                                            Spacer(minLength: 6)
-                                            Text(meeting.statusLabel)
-                                                .font(.system(size: 10, weight: .medium))
-                                                .foregroundStyle(statusColor(meeting.status))
-                                                .padding(.horizontal, 6).padding(.vertical, 3)
-                                                .background(statusColor(meeting.status).opacity(0.10), in: Capsule())
-                                                .fixedSize()
-                                        }.font(.system(size: 11)).foregroundStyle(.secondary)
-                                    }
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .padding(.horizontal, 10).padding(.vertical, 8)
-                                    .background(selection == meeting.id ? Color.accentColor.opacity(0.17) : .clear,
-                                                in: RoundedRectangle(cornerRadius: 8))
-                                    .overlay {
-                                        if selection == meeting.id && listHasFocus {
-                                            RoundedRectangle(cornerRadius: 8).strokeBorder(Color.accentColor.opacity(0.72), lineWidth: 1)
+                                HStack(alignment: .top, spacing: 8) {
+                                    Toggle("Select \(meeting.title)", isOn: Binding(
+                                        get: { markedMeetingIDs.contains(meeting.id) },
+                                        set: { marked in
+                                            selection = meeting.id
+                                            focusList()
+                                            if marked { markedMeetingIDs.insert(meeting.id) }
+                                            else { markedMeetingIDs.remove(meeting.id) }
                                         }
+                                    ))
+                                    .toggleStyle(.checkbox)
+                                    .labelsHidden()
+                                    .accessibilityIdentifier("select-meeting-\(meeting.id)")
+                                    Button {
+                                        select(meeting, proxy: proxy)
+                                    } label: {
+                                        VStack(alignment: .leading, spacing: 8) {
+                                            Text(meeting.title).font(.system(size: 13, weight: .semibold)).lineLimit(2).help(meeting.title)
+                                            HStack {
+                                                Text(meetingDate(meeting.created_at)).lineLimit(1)
+                                                Spacer(minLength: 6)
+                                                Text(meeting.statusLabel)
+                                                    .font(.system(size: 10, weight: .medium))
+                                                    .foregroundStyle(statusColor(meeting.status))
+                                                    .padding(.horizontal, 6).padding(.vertical, 3)
+                                                    .background(statusColor(meeting.status).opacity(0.10), in: Capsule())
+                                                    .fixedSize()
+                                            }.font(.system(size: 11)).foregroundStyle(.secondary)
+                                        }
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .contentShape(Rectangle())
                                     }
-                                    .contentShape(Rectangle())
+                                    .buttonStyle(.plain)
+                                    .accessibilityAddTraits(selection == meeting.id ? .isSelected : [])
+                                    .accessibilityIdentifier("meeting-\(meeting.id)")
                                 }
-                                .buttonStyle(.plain)
-                                .accessibilityAddTraits(selection == meeting.id ? .isSelected : [])
-                                .accessibilityIdentifier("meeting-\(meeting.id)")
+                                .padding(.horizontal, 10).padding(.vertical, 8)
+                                .background(selection == meeting.id ? Color.accentColor.opacity(0.17) : .clear,
+                                            in: RoundedRectangle(cornerRadius: 8))
+                                .overlay {
+                                    if selection == meeting.id && listHasFocus {
+                                        RoundedRectangle(cornerRadius: 8).strokeBorder(Color.accentColor.opacity(0.72), lineWidth: 1)
+                                    }
+                                }
                                 .id(meeting.id)
                             }
                             if filteredMeetings.isEmpty {
@@ -348,11 +377,33 @@ struct LibraryView: View {
                         }
                     }
                     .onChange(of: searchText) { _, _ in
+                        markedMeetingIDs.removeAll()
                         if let id = selection, !filteredMeetings.contains(where: { $0.id == id }) {
                             selection = filteredMeetings.first?.id
                         } else if selection == nil {
                             selection = filteredMeetings.first?.id
                         }
+                    }
+                }
+
+                if !markedMeetingIDs.isEmpty {
+                    HStack {
+                        Text("\(markedMeetingIDs.count) selected").font(.system(size: 11)).foregroundStyle(.secondary)
+                        Spacer()
+                        Button(role: .destructive, action: deleteMarkedMeetings) {
+                            Label("Delete", systemImage: "trash")
+                        }
+                        .accessibilityIdentifier("delete-selected-meetings")
+                    }
+                }
+
+                if listHasFocus {
+                    HStack(spacing: 6) {
+                        KeyboardKeycap("Space")
+                        Text("select").font(.system(size: 10)).foregroundStyle(.secondary)
+                        Spacer(minLength: 8)
+                        KeyboardKeycap("D")
+                        Text("delete").font(.system(size: 10)).foregroundStyle(.secondary)
                     }
                 }
 
@@ -382,6 +433,8 @@ struct LibraryView: View {
                             shortcut("Search", "⌘F / ⌘K / /")
                             shortcut("Move between meetings", "J / K · ↑ / ↓")
                             shortcut("First / last meeting", "G G / ⇧G")
+                            shortcut("Select / deselect meeting", "Space")
+                            shortcut("Delete selected meetings", "D")
                             shortcut("Open / return to list", "Return / L · H / Esc")
                             shortcut("Switch meetings", "⌥↑ / ⌥↓")
                             shortcut("Transcript / Notes", "⌘1 / ⌘2")
@@ -402,6 +455,7 @@ struct LibraryView: View {
             Divider()
             if let meeting = selected {
                 MeetingDetail(meeting: meeting, controller: controller, tab: $tab, contentFocused: $detailFocused, scrollTarget: detailScrollTarget)
+                    .id(meeting.id)
             } else {
                 ContentUnavailableView(searchText.isEmpty ? "No meetings yet" : "No matching meetings",
                                        systemImage: searchText.isEmpty ? "waveform" : "magnifyingglass",
@@ -415,7 +469,9 @@ struct LibraryView: View {
         .onAppear {
             if selection == nil { selection = controller.meetings.first?.id }
         }
-        .onChange(of: controller.meetings.map(\.id)) { _, ids in
+        .onChange(of: controller.meetings) { _, _ in
+            let ids = filteredMeetings.map(\.id)
+            markedMeetingIDs.formIntersection(ids)
             if !ids.contains(selection ?? "") {
                 selection = ids.first
             }
@@ -456,6 +512,20 @@ struct LibraryView: View {
             moveSelection(delta: event.keyCode == 126 ? -1 : 1)
             return true
         }
+        if listHasFocus && !option && !shift {
+            if event.keyCode == 49 {
+                pendingG = false
+                if !event.isARepeat, let meeting = selected {
+                    if !markedMeetingIDs.insert(meeting.id).inserted { markedMeetingIDs.remove(meeting.id) }
+                }
+                return true
+            }
+            if key == "d" {
+                pendingG = false
+                if !event.isARepeat { deleteMarkedMeetings() }
+                return true
+            }
+        }
         if detailFocused {
             switch event.keyCode {
             case 49: scrollDetail(by: shift ? -440 : 440); return true
@@ -486,6 +556,26 @@ struct LibraryView: View {
             return true
         }
         return false
+    }
+
+    private func deleteMarkedMeetings() {
+        let meetings = filteredMeetings.filter { markedMeetingIDs.contains($0.id) }
+        guard !meetings.isEmpty else { return }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = meetings.count == 1 ? "Move this meeting to Trash?" : "Move \(meetings.count) meetings to Trash?"
+        alert.informativeText = meetings.count == 1
+            ? "“\(meetings[0].title)” and its recording, transcript, and notes can be restored from Trash."
+            : "Their recordings, transcripts, and notes can be restored from Trash."
+        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: "Move to Trash").hasDestructiveAction = true
+        guard alert.runModal() == .alertSecondButtonReturn else { return }
+        var failure: Error?
+        do { try controller.store.moveToTrash(ids: Set(meetings.map(\.id))) }
+        catch { failure = error }
+        controller.refresh()
+        markedMeetingIDs.formIntersection(controller.meetings.map(\.id))
+        if let failure { controller.reportError(failure) }
     }
 
     private func scrollDetail(by delta: CGFloat) {
@@ -551,10 +641,11 @@ struct MeetingDetail: View {
     @Binding var tab: Int
     @Binding var contentFocused: Bool
     fileprivate let scrollTarget: LibraryScrollTarget
-    @ViewState private var transcript = ""
-    @ViewState private var mom = ""
-    @ViewState private var transcriptSegments: [TranscriptSegment] = []
-    @ViewState private var minutesBlocks: [MinutesBlock] = []
+    @ViewState private var outputs: LoadedOutputs?
+    private var transcript: String { outputs?.transcript ?? "" }
+    private var mom: String { outputs?.mom ?? "" }
+    private var transcriptSegments: [TranscriptSegment] { outputs?.segments ?? [] }
+    private var minutesBlocks: [MinutesBlock] { outputs?.minutes ?? [] }
     private var hasTranscript: Bool {
         FileManager.default.fileExists(atPath: meeting.directory.appendingPathComponent("transcript.json").path)
             || FileManager.default.fileExists(atPath: meeting.directory.appendingPathComponent("transcript.txt").path)
@@ -637,16 +728,19 @@ struct MeetingDetail: View {
                 }
             }
             Group {
-                if tab == 0 { transcriptOutput }
+                if outputs == nil {
+                    ProgressView().controlSize(.small)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if tab == 0 { transcriptOutput }
                 else { momOutput }
             }.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }.padding(24).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("meeting-detail-\(meeting.id)")
             .simultaneousGesture(TapGesture().onEnded { contentFocused = true })
-            .onAppear(perform: loadOutputs)
-            .onChange(of: meeting.id) { _, _ in loadOutputs() }
-            .onChange(of: meeting.status) { _, _ in loadOutputs() }
+            .task(id: OutputRequest(directory: meeting.directory, status: meeting.status)) {
+                await loadOutputs()
+            }
     }
 
     private func failureBanner(_ message: String) -> some View {
@@ -686,7 +780,7 @@ struct MeetingDetail: View {
     }
     private var transcriptOutput: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
+            LazyVStack(alignment: .leading, spacing: 12) {
                 if transcriptSegments.isEmpty {
                     Text(transcript.isEmpty ? "No transcript yet." : transcript)
                         .font(.system(size: 14)).lineSpacing(5)
@@ -715,7 +809,7 @@ struct MeetingDetail: View {
     }
     private var momOutput: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
+            LazyVStack(alignment: .leading, spacing: 14) {
                 if mom.isEmpty {
                     Text("No meeting notes yet.").foregroundStyle(.secondary)
                 } else if minutesBlocks.isEmpty {
@@ -746,12 +840,22 @@ struct MeetingDetail: View {
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.secondary.opacity(0.12)))
     }
     private struct TranscriptDocument: Decodable { let segments: [TranscriptSegment] }
-    private struct TranscriptSegment: Decodable { let start: TimeInterval; let text: String }
-    private struct MinutesBlock: Identifiable {
+    private struct TranscriptSegment: Decodable, Sendable { let start: TimeInterval; let text: String }
+    private struct MinutesBlock: Identifiable, Sendable {
         let id: Int
         let text: AttributedString
         let heading: Int?
         let marker: String?
+    }
+    private struct OutputRequest: Equatable {
+        let directory: URL
+        let status: String
+    }
+    private struct LoadedOutputs: Sendable {
+        let transcript: String
+        let mom: String
+        let segments: [TranscriptSegment]
+        let minutes: [MinutesBlock]
     }
     private func shortTimestamp(_ seconds: Double) -> String {
         let value = Int(seconds)
@@ -762,15 +866,31 @@ struct MeetingDetail: View {
         guard let date = ISO8601DateFormatter().date(from: value) else { return value }
         return DateFormatter.localizedString(from: date, dateStyle: .medium, timeStyle: .short)
     }
-    private func loadOutputs() {
-        transcript = (try? String(contentsOf: meeting.directory.appendingPathComponent("transcript.txt"), encoding: .utf8)) ?? ""
-        mom = (try? String(contentsOf: meeting.directory.appendingPathComponent("mom.md"), encoding: .utf8)) ?? ""
-        transcriptSegments = (try? JSONDecoder().decode(TranscriptDocument.self, from: Data(contentsOf: meeting.directory.appendingPathComponent("transcript.json"))))?.segments.filter {
+    @MainActor private func loadOutputs() async {
+        let directory = meeting.directory
+        let work = Task.detached(priority: .userInitiated) { try Self.readOutputs(in: directory) }
+        let loaded = try? await withTaskCancellationHandler {
+            try await work.value
+        } onCancel: {
+            work.cancel()
+        }
+        guard !Task.isCancelled, let loaded else { return }
+        outputs = loaded
+    }
+
+    nonisolated private static func readOutputs(in directory: URL) throws -> LoadedOutputs {
+        try Task.checkCancellation()
+        let segments = (try? JSONDecoder().decode(TranscriptDocument.self, from: Data(contentsOf: directory.appendingPathComponent("transcript.json"))))?.segments.filter {
             $0.start.isFinite && $0.start >= 0 && $0.start < Double(Int.max) && !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         } ?? []
-        minutesBlocks = []
+        try Task.checkCancellation()
+        let transcript = segments.isEmpty ? (try? String(contentsOf: directory.appendingPathComponent("transcript.txt"), encoding: .utf8)) ?? "" : ""
+        let mom = (try? String(contentsOf: directory.appendingPathComponent("mom.md"), encoding: .utf8)) ?? ""
+        try Task.checkCancellation()
+        var minutes: [MinutesBlock] = []
         if let parsed = try? AttributedString(markdown: mom) {
             for (intent, range) in parsed.runs[\.presentationIntent] {
+                try Task.checkCancellation()
                 var heading: Int?
                 var ordinal: Int?
                 var ordered = false
@@ -782,10 +902,12 @@ struct MeetingDetail: View {
                     default: break
                     }
                 }
-                minutesBlocks.append(MinutesBlock(id: minutesBlocks.count, text: AttributedString(parsed[range]),
-                                                  heading: heading, marker: ordinal.map { ordered ? "\($0)." : "•" }))
+                minutes.append(MinutesBlock(id: minutes.count, text: AttributedString(parsed[range]),
+                                           heading: heading, marker: ordinal.map { ordered ? "\($0)." : "•" }))
             }
         }
+        try Task.checkCancellation()
+        return LoadedOutputs(transcript: transcript, mom: mom, segments: segments, minutes: minutes)
     }
 }
 

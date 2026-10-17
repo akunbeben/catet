@@ -164,10 +164,12 @@ final class CatetController: ObservableObject {
     @Published var statusMessage = ""
     @Published var quickRecordingKeyboardActive = false
     @Published var quickRecordingShortcutAvailable = false
+    @Published private(set) var pillExpanded = false
     @Published var codexAccounts: [CodexAccount] = []
     @Published var selectedCodexAccountID = "default"
     var codexAccountsWindow: CodexAccountsWindow?
     var isRetryingScheduledNotes = false
+    var lastAccountRefreshAt = Date.distantPast
     let store = MeetingStore()
     let recorder = MeetingRecorder()
     private var libraryWindow: NSWindow?
@@ -207,12 +209,31 @@ final class CatetController: ObservableObject {
             }
         }
         makePill()
-        refreshTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in self?.refresh() }
+        retryScheduledNotes()
+        scheduleRefresh()
     }
     func refresh() {
-        meetings = store.loadAndRecover()
+        let updated = store.loadAndRecover()
+        if meetings != updated { meetings = updated }
         refreshCodexAccounts()
         retryScheduledNotes()
+        scheduleRefresh()
+    }
+    private func scheduleRefresh() {
+        refreshTimer?.invalidate()
+        let showingProgress = libraryWindow?.isVisible == true || isRetryingScheduledNotes
+            || meetings.contains { $0.status == "transcribing" || $0.status == "summarizing" }
+        var interval: TimeInterval = showingProgress ? 1.5 : 15
+        let now = Date()
+        for meeting in meetings where meeting.status == "waiting_for_limit" {
+            if let retry = meeting.retryDate, retry > now {
+                interval = min(interval, retry.timeIntervalSince(now))
+            }
+        }
+        let timer = Timer(timeInterval: max(0.1, interval), repeats: false) { [weak self] _ in self?.refresh() }
+        timer.tolerance = min(interval * 0.1, 0.5)
+        RunLoop.main.add(timer, forMode: .common)
+        refreshTimer = timer
     }
     func reportError(_ error: Error) {
         statusMessage = error.localizedDescription
@@ -237,13 +258,14 @@ final class CatetController: ObservableObject {
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") { NSWorkspace.shared.open(url) }
     }
     func showLibrary() {
-        if let libraryWindow, libraryWindow.isVisible { libraryWindow.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true); return }
+        if let libraryWindow, libraryWindow.isVisible { libraryWindow.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true); refresh(); return }
         let view = LibraryView(controller: self)
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 880, height: 650), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         window.contentViewController = NSHostingController(rootView: view)
         window.title = "Catet Meetings"; window.setContentSize(NSSize(width: 880, height: 650)); window.minSize = NSSize(width: 650, height: 460)
         window.isReleasedWhenClosed = false
         window.center(); window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true); libraryWindow = window
+        refresh()
     }
     private func makePill() {
         let panel = FloatingPanel(contentRect: NSRect(x: 0, y: 0, width: FloatingPill.collapsedWidth, height: FloatingPill.height), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
@@ -259,10 +281,11 @@ final class CatetController: ObservableObject {
         panel.orderFrontRegardless(); pillWindow = panel
     }
     func setPillExpanded(_ expanded: Bool) {
+        if pillExpanded != expanded { pillExpanded = expanded }
         guard let panel = pillWindow, let screen = panel.screen ?? NSScreen.main else { return }
-        let width = expanded || quickRecordingKeyboardActive ? FloatingPill.expandedWidth : FloatingPill.collapsedWidth
-        let height = FloatingPill.height + (quickRecordingKeyboardActive ? FloatingPill.keyboardHintHeight : 0)
-        let target = NSRect(x: screen.visibleFrame.minX + 2, y: panel.frame.minY, width: width, height: height)
+        let width = expanded ? FloatingPill.expandedWidth : FloatingPill.collapsedWidth
+        let height = FloatingPill.height + (expanded && quickRecordingKeyboardActive ? FloatingPill.keyboardHintHeight : 0)
+        let target = NSRect(x: screen.visibleFrame.minX + 2, y: panel.frame.maxY - height, width: width, height: height)
         guard panel.frame != target else { return }
         if quickRecordingKeyboardActive || NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
             panel.setFrame(target, display: true)
@@ -294,7 +317,7 @@ final class CatetController: ObservableObject {
             panel.keyboardEnabled = false
             if panel.isKeyWindow { panel.resignKey() }
         }
-        setPillExpanded(isRecording)
+        setPillExpanded(pillExpanded)
     }
 
     private func handleQuickRecordingKey(_ event: NSEvent) -> Bool {
@@ -347,7 +370,7 @@ final class CatetController: ObservableObject {
         NSApp.activate(ignoringOtherApps: true)
         guard dialog.alert.runModal() == .alertSecondButtonReturn else { return true }
         do {
-            try store.discardRecording(id: meeting.id)
+            try store.moveToTrash(ids: [meeting.id], onlyUnprocessedRecordings: true)
             refresh()
         } catch {
             reportError(error)

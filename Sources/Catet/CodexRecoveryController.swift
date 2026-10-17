@@ -6,12 +6,20 @@ extension CatetController {
     }
 
     func refreshCodexAccounts() {
+        let now = Date()
+        defer { lastAccountRefreshAt = now }
         do {
             let registry = CodexAccounts(root: store.root)
-            codexAccounts = try registry.accounts()
-            selectedCodexAccountID = try registry.selected().account.id
+            let accounts = try registry.accounts()
+            let selectedID = try registry.selected().account.id
+            let cooldownExpired = accounts.contains { account in
+                account.retryAt.map { $0 > lastAccountRefreshAt && $0 <= now } == true
+            }
+            if codexAccounts != accounts || cooldownExpired { codexAccounts = accounts }
+            if selectedCodexAccountID != selectedID { selectedCodexAccountID = selectedID }
         } catch {
-            statusMessage = "Codex accounts could not be loaded. Open account settings to try again."
+            let message = "Codex accounts could not be loaded. Open account settings to try again."
+            if statusMessage != message { statusMessage = message }
         }
     }
 
@@ -67,8 +75,7 @@ extension CatetController {
                         }
                     } catch { self.statusMessage = "The retry state could not be saved. Open the meeting folder for diagnostics." }
                 }
-                self.meetings = self.store.loadAndRecover()
-                self.refreshCodexAccounts()
+                self.refresh()
             }
         }
     }
