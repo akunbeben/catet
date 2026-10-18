@@ -740,15 +740,27 @@ private func humanResetTime(_ date: Date, timeZone: TimeZone) -> String {
 }
 
 private func discoverAudio(in directory: URL) throws -> (channels: [URL], imports: [URL]) {
-    let channels = ["microphone.wav", "system.wav"].map { directory.appendingPathComponent($0) }
-        .filter { FileManager.default.fileExists(atPath: $0.path) }
+    let channelNames = ["microphone", "system"]
+    let channels = channelNames.compactMap { name -> URL? in
+        let wav = directory.appendingPathComponent("\(name).wav")
+        if FileManager.default.fileExists(atPath: wav.path) { return wav }
+        let ogg = directory.appendingPathComponent("\(name).ogg")
+        return FileManager.default.fileExists(atPath: ogg.path) ? ogg : nil
+    }
     if !channels.isEmpty { return (channels, []) }
     let entries = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.isRegularFileKey])) ?? []
     let imports = entries.filter {
         $0.lastPathComponent.hasPrefix("input.") && audioExtensions.contains($0.pathExtension.lowercased()) &&
             ((try? $0.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true)
-    }.sorted { $0.lastPathComponent < $1.lastPathComponent }
-    if !imports.isEmpty { return ([], imports) }
+    }.sorted { lhs, rhs in
+        if lhs.pathExtension.lowercased() == "wav" && rhs.pathExtension.lowercased() == "ogg" { return true }
+        if lhs.pathExtension.lowercased() == "ogg" && rhs.pathExtension.lowercased() == "wav" { return false }
+        return lhs.lastPathComponent < rhs.lastPathComponent
+    }
+    if !imports.isEmpty {
+        let selected = imports.first!
+        return ([], [selected])
+    }
     throw EngineError("No microphone.wav, system.wav, or imported input audio was found.")
 }
 
@@ -776,6 +788,7 @@ private func transcribe(_ directory: URL, config: RuntimeConfig) throws {
     _ = try updateStatus(in: directory, status: "transcribing", values: [
         "error": NSNull(), "error_kind": NSNull(), "retry_at": NSNull(), "failed_step": NSNull()
     ])
+    defer { try? FileManager.default.removeItem(at: directory.appendingPathComponent("audio.wav")) }
     let audio = try prepareAudio(in: directory, config: config)
     let prefix = directory.appendingPathComponent("whisper")
     let rawPath = directory.appendingPathComponent("whisper.json")
@@ -793,9 +806,6 @@ private func transcribe(_ directory: URL, config: RuntimeConfig) throws {
         raw = object
     } catch { throw EngineError("Cannot parse whisper.cpp JSON output: \(error)") }
     try writeTranscript(normalizeWhisper(raw), to: directory)
-    _ = try updateStatus(in: directory, status: "transcribed", values: [
-        "error": NSNull(), "error_kind": NSNull(), "retry_at": NSNull(), "failed_step": NSNull()
-    ])
 }
 
 private func humanAccountFailure(_ error: CodexAccountsError) -> EngineFailure {
@@ -1063,6 +1073,11 @@ func processMeeting(_ directory: URL, root: URL, withMom: Bool, config: RuntimeC
         do { try transcribe(meeting, config: config) }
         catch { recordFailure(meeting, step: "transcribe", error: error); throw error }
     }
+    do { try compactAudio(in: meeting, config: config) }
+    catch { recordFailure(meeting, step: "compact", error: error); throw error }
+    _ = try updateStatus(in: meeting, status: "transcribed", values: [
+        "error": NSNull(), "error_kind": NSNull(), "retry_at": NSNull(), "failed_step": NSNull()
+    ])
     if withMom {
         var accountID: String?
         do {
@@ -1083,9 +1098,6 @@ func processMeeting(_ directory: URL, root: URL, withMom: Bool, config: RuntimeC
             throw error
         }
     }
-    _ = try updateStatus(in: meeting, status: "transcribed", values: [
-        "error": NSNull(), "error_kind": NSNull(), "retry_at": NSNull(), "failed_step": NSNull()
-    ])
     return nil
 }
 
@@ -1211,6 +1223,7 @@ Commands:
   list [--json]
   import AUDIO [--title TITLE]
   process DIRECTORY [--mom]
+  compact DIRECTORY            Archive WAV recording channels as Ogg Opus
   retry-notes DIRECTORY      Retry due notes with their original account
   mom DIRECTORY              Create meeting notes with Codex
   show DIRECTORY [--mom]
@@ -1299,6 +1312,13 @@ struct CatetEngineMain {
                 }
                 guard let audio else { Darwin.exit(usageError("import requires AUDIO")) }
                 print(try importAudio(expandPath(audio), title: title, root: args.root).path)
+            case "compact":
+                let rest = Array(args.command.dropFirst())
+                guard rest.count == 1, !rest[0].hasPrefix("-") else {
+                    Darwin.exit(usageError("compact requires exactly one DIRECTORY"))
+                }
+                let config = try RuntimeConfig.load()
+                print(try compactMeeting(expandPath(rest[0]), root: args.root, config: config).path)
             case "process":
                 let rest = Array(args.command.dropFirst())
                 let directories = rest.filter { $0 != "--mom" && !$0.hasPrefix("-") }
@@ -1341,14 +1361,16 @@ struct CatetEngineMain {
             default:
                 Darwin.exit(usageError("invalid choice: '\(command)'"))
             }
-            if !["list", "show"].contains(command) && !(command == "hooks" && args.command.dropFirst().first == "list") {
+            if !["list", "show", "compact"].contains(command) && !(command == "hooks" && args.command.dropFirst().first == "list") {
                 do { try MeetingHooks.deliverPending(root: args.root) }
                 catch { fputs("catet: could not deliver command hooks: \(error)\n", stderr) }
             }
             if caughtSignal != 0 { Darwin.exit(1) }
         } catch {
-            do { try MeetingHooks.deliverPending(root: args.root) }
-            catch { fputs("catet: could not deliver command hooks: \(error)\n", stderr) }
+            if command != "compact" {
+                do { try MeetingHooks.deliverPending(root: args.root) }
+                catch { fputs("catet: could not deliver command hooks: \(error)\n", stderr) }
+            }
             fputs("catet: \(error)\n", stderr)
             Darwin.exit(1)
         }

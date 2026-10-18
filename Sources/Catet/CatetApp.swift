@@ -416,12 +416,6 @@ final class CatetController: ObservableObject {
                     self.discardRecording(meeting)
                     return
                 }
-                if failure == nil {
-                    do {
-                        try MeetingHooks.enqueue(event: "recording.saved", directory: meeting.directory, metadata: [:])
-                        self.drainHooks()
-                    } catch { fputs("catet: could not queue recording.saved hook: \(error)\n", stderr) }
-                }
                 self.finishRecording(meeting, captureFailure: failure)
             }
         }
@@ -478,11 +472,40 @@ final class CatetController: ObservableObject {
                 } catch {
                     failureForUser = "Catet could not save the transcription state. Your audio is still saved. \(error.localizedDescription)"
                 }
+                do { try await self.compactRecording(meeting) }
+                catch {
+                    failureForUser += " Audio compression also failed. Your original audio is still saved."
+                    fputs("catet: audio compression failed: \(error.localizedDescription)\n", stderr)
+                }
+                self.enqueueSavedRecording(meeting)
                 self.completeRecordingLifecycle(meeting, failure: StoreError.processing(failureForUser))
                 return
             }
+            do {
+                try await compactRecording(meeting)
+            } catch {
+                self.enqueueSavedRecording(meeting)
+                self.completeRecordingLifecycle(meeting, failure: StoreError.processing(
+                    "The transcript is saved, but audio compression did not finish. Your recording is still saved. \(error.localizedDescription)"
+                ))
+                return
+            }
+            self.enqueueSavedRecording(meeting)
             self.completeRecordingLifecycle(meeting, failure: nil)
         }
+    }
+    private func compactRecording(_ meeting: Meeting) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            store.runEngine(meeting: meeting, command: "compact", transcriptOnly: true) {
+                continuation.resume(with: $0)
+            }
+        }
+    }
+    private func enqueueSavedRecording(_ meeting: Meeting) {
+        do {
+            try MeetingHooks.enqueue(event: "recording.saved", directory: meeting.directory, metadata: [:])
+            drainHooks()
+        } catch { fputs("catet: could not queue recording.saved hook: \(error)\n", stderr) }
     }
     private func discardRecording(_ meeting: Meeting) {
         let id = meeting.id

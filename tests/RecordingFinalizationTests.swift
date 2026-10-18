@@ -26,39 +26,44 @@ struct RecordingFinalizationTests {
         }
         let store = MeetingStore()
         try store.createRoot()
-        let ffmpeg = temp.appendingPathComponent("ffmpeg")
         let whisper = temp.appendingPathComponent("whisper")
         let codex = temp.appendingPathComponent("codex")
         let calls = temp.appendingPathComponent("batch-calls")
         let fail = temp.appendingPathComponent("fail")
-        // Exercise the real engine and lock handoff, substituting only codec/model tools.
-        try executable(ffmpeg, """
-        printf 'attempt\\n' >> '\(calls.path)'
-        input=''
-        while [ "$#" -gt 1 ]; do
-          if [ "$1" = '-i' ]; then shift; input="$1"; fi
-          shift
-        done
-        /bin/cp "$input" "$1"
-        """)
+        // Exercise the real engine and codecs, substituting only the transcription model.
+        let runtime = Bundle.main.executableURL!.deletingLastPathComponent().appendingPathComponent("runtime.json")
+        let configuredRuntime = try JSONSerialization.jsonObject(with: Data(contentsOf: runtime)) as! [String: Any]
+        let ffmpegPath = configuredRuntime["ffmpeg"] as! String
         try executable(whisper, """
+        printf 'attempt\\n' >> '\(calls.path)'
         if [ -f '\(fail.path)' ]; then printf 'decoder failed\\n' >&2; exit 7; fi
         while [ "$1" != '-of' ]; do shift; done
         shift
         printf '%s' '{"transcription":[{"offsets":{"from":0,"to":2000},"text":"Recovered from the complete saved recording."}]}' > "$1.json"
         """)
         try executable(codex, "exit 99")
-        let runtime = Bundle.main.executableURL!.deletingLastPathComponent().appendingPathComponent("runtime.json")
-        try JSONSerialization.data(withJSONObject: ["ffmpeg": ffmpeg.path, "whisper": whisper.path,
+        try JSONSerialization.data(withJSONObject: ["ffmpeg": ffmpegPath, "whisper": whisper.path,
             "model": temp.appendingPathComponent("model").path, "vad": temp.appendingPathComponent("vad").path,
             "codex": codex.path]).write(to: runtime)
         defer { try? fm.removeItem(at: runtime) }
         try JSONSerialization.data(withJSONObject: ["command": ["/usr/bin/true"]])
             .write(to: temp.appendingPathComponent("hooks.json"))
-        let audio = Data(repeating: 31, count: 128)
+        let audio = temp.appendingPathComponent("fixture.wav")
+        let makeAudio = Process()
+        makeAudio.executableURL = URL(fileURLWithPath: ffmpegPath)
+        makeAudio.arguments = ["-hide_banner", "-nostdin", "-v", "error", "-f", "lavfi", "-i",
+                               "sine=frequency=440:sample_rate=48000:duration=1", "-ac", "1",
+                               "-c:a", "pcm_s16le", "-y", audio.path]
+        try makeAudio.run()
+        makeAudio.waitUntilExit()
+        try check(makeAudio.terminationStatus == 0, "Real ffmpeg must create a valid WAV fixture")
+        let audioData = try Data(contentsOf: audio)
+        func savedAudio(_ meeting: Meeting) throws {
+            try audioData.write(to: meeting.directory.appendingPathComponent("microphone.wav"))
+        }
         func recording(_ title: String) throws -> Meeting {
             let meeting = try store.newMeeting(title: title, generateMoM: true)
-            try audio.write(to: meeting.directory.appendingPathComponent("microphone.wav"))
+            try savedAudio(meeting)
             try store.reserveForLiveTranscription(meeting.id)
             try store.update(id: meeting.id) { $0.status = "transcribing" }
             return meeting
@@ -80,8 +85,9 @@ struct RecordingFinalizationTests {
                   "Saved-audio recovery must finish the transcript without consuming the notes preference")
         try check(try String(contentsOf: recovered.directory.appendingPathComponent("transcript.txt")).contains("Recovered from the complete saved recording."),
                   "Recovery must replace partial live output with the full saved-audio transcript")
-        try check(try Data(contentsOf: recovered.directory.appendingPathComponent("microphone.wav")) == audio,
-                  "Recovery must preserve the original recording")
+        try check(fm.fileExists(atPath: recovered.directory.appendingPathComponent("microphone.ogg").path) &&
+                  !fm.fileExists(atPath: recovered.directory.appendingPathComponent("microphone.wav").path),
+                  "Successful recovery must archive the original recording after transcription")
         try check(stayedInProgress, "A provisional live failure must stay in progress until handoff")
         try check(!store.isLocallyProcessing(recovered.id), "Recovery must release the recording and engine reservations")
         try check(try MeetingHooks.status(root: root).map { $0["event"] as! String } == ["transcript.ready"],
@@ -102,8 +108,9 @@ struct RecordingFinalizationTests {
                   "Only the final batch failure must expose manual transcription retry")
         try check(failure.failureMessage?.contains("Retry transcription") == true,
                   "Final failure must give an actionable manual retry")
-        try check(try Data(contentsOf: failed.directory.appendingPathComponent("microphone.wav")) == audio,
-                  "Final failure must keep saved audio")
+        try check(try Data(contentsOf: failed.directory.appendingPathComponent("microphone.wav")) == audioData &&
+                  !fm.fileExists(atPath: failed.directory.appendingPathComponent("microphone.ogg").path),
+                  "Transcription failure must preserve source WAV without publishing an archive")
         try check(!store.isLocallyProcessing(failed.id), "Final failure must release reservations")
         try check(try MeetingHooks.status(root: root).filter { $0["event"] as? String == "processing.failed" }.count == 1,
                   "Live plus batch failure must publish exactly one final failure event")
@@ -116,6 +123,17 @@ struct RecordingFinalizationTests {
         }, cancelLive: { fatalError("A successful live transcription must not be cancelled") })
         try check(store.meeting(id: live.id)?.status == "transcribed" && !store.isLocallyProcessing(live.id),
                   "Successful live finalization must publish readiness and release its reservation")
+        try "processing sentinel".write(to: live.directory.appendingPathComponent("processing.log"), atomically: true, encoding: .utf8)
+        let compactResult: Result<Void, Error> = await withCheckedContinuation { continuation in
+            store.runEngine(meeting: live, command: "compact", transcriptOnly: true) { continuation.resume(returning: $0) }
+        }
+        try compactResult.get()
+        try check(fm.fileExists(atPath: live.directory.appendingPathComponent("microphone.ogg").path) &&
+                  !fm.fileExists(atPath: live.directory.appendingPathComponent("microphone.wav").path),
+                  "The store compact command must publish archived audio")
+        try check(try String(contentsOf: live.directory.appendingPathComponent("processing.log")) == "processing sentinel" &&
+                  fm.fileExists(atPath: live.directory.appendingPathComponent("compression.log").path),
+                  "Compaction must use its dedicated log without overwriting processing diagnostics")
         try check(try String(contentsOf: calls) == "attempt\nattempt\n", "Successful live transcription must not trigger batch processing")
         print("PASS: Successful live finalization avoids unnecessary batch transcription")
     }

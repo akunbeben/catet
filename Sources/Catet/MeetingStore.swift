@@ -179,7 +179,9 @@ final class MeetingStore {
             if status == "recording" {
                 if isLocallyProcessing(all[i].id) { continue }
                 all[i].status = "recorded"
-                if !fm.fileExists(atPath: all[i].directory.appendingPathComponent("microphone.wav").path) && !fm.fileExists(atPath: all[i].directory.appendingPathComponent("system.wav").path) {
+                if !["microphone.wav", "system.wav", "microphone.ogg", "system.ogg"].contains(where: {
+                    fm.fileExists(atPath: all[i].directory.appendingPathComponent($0).path)
+                }) {
                     all[i].error = "The app stopped before audio was finalized. No complete recording is available."
                 } else { all[i].error = "Catet restarted during recording. Available audio was preserved; retry transcription to continue." }
                 do { try persist(all[i]) } catch { all[i].error = "Could not save recovery state: \(error.localizedDescription)" }
@@ -330,7 +332,8 @@ final class MeetingStore {
                     environment["CATET_CODEX_ACCOUNT_ID"] = requestedAccountID
                     p.environment = environment
                 }
-                let logURL = meeting.directory.appendingPathComponent("processing.log")
+                let logName = command == "compact" ? "compression.log" : "processing.log"
+                let logURL = meeting.directory.appendingPathComponent(logName)
                 try? FileManager.default.removeItem(at: logURL)
                 FileManager.default.createFile(atPath: logURL.path, contents: nil)
                 let handle = try FileHandle(forWritingTo: logURL)
@@ -340,7 +343,7 @@ final class MeetingStore {
                     try? handle.close()
                     proc.terminationHandler = nil
                     self?.finishProcess(meetingID: meeting.id)
-                    completion(proc.terminationStatus == 0 ? .success(()) : .failure(StoreError.processing("CatetEngine exited with status \(proc.terminationStatus). See processing.log.")))
+                    completion(proc.terminationStatus == 0 ? .success(()) : .failure(StoreError.processing("CatetEngine exited with status \(proc.terminationStatus). See \(logName).")))
                 }
                 try p.run()
             } catch {

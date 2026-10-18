@@ -62,6 +62,9 @@ struct HookTestFailure: Error { let message: String }
 
     private static func testDisabledAndPayload(root: URL) throws {
         let directory = try makeMeeting(root)
+        try Data("capture".utf8).write(to: directory.appendingPathComponent("microphone.wav"))
+        try Data("archive".utf8).write(to: directory.appendingPathComponent("microphone.ogg"))
+        try Data("capture".utf8).write(to: directory.appendingPathComponent("system.wav"))
         try MeetingHooks.enqueue(event: "recording.saved", directory: directory, metadata: [:])
         try check(try entries(root).isEmpty, "Absent configuration must disable hook creation")
         try MeetingHooks.deliverPending(root: root)
@@ -94,6 +97,10 @@ struct HookTestFailure: Error { let message: String }
         let files = payload["files"] as! [String: Any]
         try check(files["metadata"] as? String == directory.appendingPathComponent("meeting.json").path, "Payload must provide the safe metadata file path")
         try check(files["transcript_text"] as? String == directory.appendingPathComponent("transcript.txt").path, "Payload may expose finalized output paths")
+        try check(files["microphone"] as? String == directory.appendingPathComponent("microphone.ogg").path,
+                  "Archived audio must take precedence over a capture WAV")
+        try check(files["system"] as? String == directory.appendingPathComponent("system.wav").path,
+                  "Capture WAV must remain the hook fallback when no archive exists")
         let serialized = String(decoding: data, as: UTF8.self)
         try check(!serialized.contains("private transcript content") && !serialized.contains("private notes content"), "Payload must not contain transcript or notes content")
         let environment = try String(contentsOf: environmentURL, encoding: .utf8)

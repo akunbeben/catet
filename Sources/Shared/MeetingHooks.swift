@@ -377,12 +377,17 @@ enum MeetingHooks {
         var files: [String: Any] = [:]
         let names: [(String, String)] = [
             ("metadata", "meeting.json"), ("transcript_json", "transcript.json"),
-            ("transcript_text", "transcript.txt"), ("notes", "mom.md"),
-            ("microphone", "microphone.wav"), ("system", "system.wav")
+            ("transcript_text", "transcript.txt"), ("notes", "mom.md")
         ]
         for (key, name) in names {
             let url = directory.appendingPathComponent(name)
             if try isRegularFileWithoutSymlink(url) { files[key] = url.path }
+        }
+        for channel in ["microphone", "system"] {
+            let archived = directory.appendingPathComponent(channel + ".ogg")
+            let capture = directory.appendingPathComponent(channel + ".wav")
+            if try isRegularFileWithoutSymlink(archived) { files[channel] = archived.path }
+            else if try isRegularFileWithoutSymlink(capture) { files[channel] = capture.path }
         }
         let allowedInputExtensions: Set<String> = ["wav", "mp3", "m4a", "aac", "flac", "ogg", "mp4", "mov", "aiff", "wma"]
         let children = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
