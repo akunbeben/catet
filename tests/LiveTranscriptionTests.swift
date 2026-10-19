@@ -225,6 +225,29 @@ struct LiveTranscriptionTests {
         print("PASS: Nonzero window timestamps and final-tail bounds remain continuous")
     }
 
+    static func testRecoveryBudget() throws {
+        var recovery = LiveTranscriptionRecovery()
+        try check(recovery.retryDelay(for: .model("Download interrupted"), cursor: 0) == 2,
+                  "A temporary model failure must retry instead of terminating live transcription")
+        try check(recovery.retryDelay(for: .audio("Growing file not ready"), cursor: 0) == 4,
+                  "Changing error types without audio progress must share the same retry budget")
+        try check(recovery.retryDelay(for: .inference("Empty speech window"), cursor: 0) == 8,
+                  "Repeated failures on the same audio must back off")
+        try check(recovery.retryDelay(for: .inference("Still failing"), cursor: 0) == nil,
+                  "A stuck audio window must eventually fall back to saved-audio transcription")
+        try check(recovery.retryDelay(for: .inference("Later window"), cursor: 320_000) == 2,
+                  "Progress to new audio must restore retries for a later temporary failure")
+        try check(recovery.retryDelay(for: .inference("Same later window"), cursor: 320_000) == 4,
+                  "The new window must also retain its retry count")
+
+        for fatal in [LiveTranscriptionError.persistence("Disk full"), .cancelled, .noSpeech] {
+            var fresh = LiveTranscriptionRecovery()
+            try check(fresh.retryDelay(for: fatal, cursor: 0) == nil,
+                      "Persistence failures, cancellation, and final no-speech results must not loop")
+        }
+        print("PASS: Live recovery backs off, bounds retries per audio cursor, and stops on fatal errors")
+    }
+
     static func main() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("catet-live-transcription-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -233,6 +256,7 @@ struct LiveTranscriptionTests {
         try testPartialSampleStopBoundaries(in: directory)
         try testSegmentConfirmationAndSilence()
         try testAbsoluteSegmentMapping()
+        try testRecoveryBudget()
         print("All live-transcription regressions passed.")
     }
 }

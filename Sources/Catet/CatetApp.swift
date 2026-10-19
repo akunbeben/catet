@@ -253,6 +253,7 @@ final class CatetController: ObservableObject {
                 case .preparingModel: message = "Preparing transcription model"
                 case .transcribing: message = "Transcribing live audio"
                 case .ready: message = "Listening for speech"
+                case .retrying: message = "Retrying live transcription…"
                 case .failed(_): message = "Live transcription paused. Catet will transcribe after recording stops."
                 case .cancelled: message = ""
                 }

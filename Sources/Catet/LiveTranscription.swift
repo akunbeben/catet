@@ -7,6 +7,7 @@ actor LiveTranscription {
         case preparingModel
         case transcribing
         case ready
+        case retrying
         case failed(String)
         case cancelled
     }
@@ -32,6 +33,7 @@ actor LiveTranscription {
     private var lastInferenceEndFrame: Int64?
     private var segmentConfirmation = LiveSegmentConfirmation()
     private var terminalError: LiveTranscriptionError?
+    private var recovery = LiveTranscriptionRecovery()
 
     init(directory: URL) {
         self.directory = directory
@@ -121,22 +123,35 @@ actor LiveTranscription {
     }
 
     private func runWorker() async {
-        do {
-            try Task.checkCancellation()
-            guard !cancelled else { return }
-            try await loadModelIfNeeded()
-            while !finishing && !cancelled {
+        while !finishing && !cancelled {
+            do {
                 try Task.checkCancellation()
+                try await loadModelIfNeeded()
                 try await processWindows(final: false)
                 if !finishing && !cancelled { status = .ready }
                 try await Task.sleep(nanoseconds: 1_000_000_000)
+            } catch is CancellationError {
+                if !cancelled && !finishing { fail(.inference("Background transcription was interrupted.")) }
+                return
+            } catch {
+                guard !finishing && !cancelled else { return }
+                let failure = error as? LiveTranscriptionError ?? .inference(error.localizedDescription)
+                guard let delay = recovery.retryDelay(for: failure, cursor: nextWindowStartFrame) else {
+                    fail(failure)
+                    return
+                }
+                // Retry the unconfirmed window even if inference already returned an empty result.
+                lastInferenceEndFrame = nil
+                if case .inference = failure { model = nil }
+                status = .retrying
+                fputs("catet: live transcription retry in \(delay)s at frame \(nextWindowStartFrame): \(failure.localizedDescription)\n", stderr)
+                // Check for recording stop each second so finalization does not wait out backoff.
+                for _ in 0..<delay {
+                    guard !finishing && !cancelled else { return }
+                    do { try await Task.sleep(nanoseconds: 1_000_000_000) }
+                    catch { return }
+                }
             }
-        } catch is CancellationError {
-            if !cancelled && !finishing { fail(.inference("Background transcription was interrupted.")) }
-        } catch let error as LiveTranscriptionError {
-            if !cancelled { fail(error) }
-        } catch {
-            if !cancelled { fail(.inference(error.localizedDescription)) }
         }
     }
 

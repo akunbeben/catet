@@ -67,6 +67,29 @@ enum LiveTranscriptionError: Error, LocalizedError, Equatable, Sendable {
     }
 }
 
+/// A new audio cursor gets a fresh retry budget; idle polls do not replenish it.
+struct LiveTranscriptionRecovery {
+    private var failedCursor: Int64?
+    private var retries = 0
+
+    mutating func retryDelay(for error: LiveTranscriptionError, cursor: Int64) -> Int? {
+        switch error {
+        case .audio, .model, .inference:
+            break
+        case .noSpeech, .persistence, .cancelled:
+            return nil
+        }
+        if failedCursor != cursor {
+            failedCursor = cursor
+            retries = 0
+        }
+        guard retries < 3 else { return nil }
+        let delay = 2 << retries
+        retries += 1
+        return delay
+    }
+}
+
 struct LiveSegmentConfirmation {
     private(set) var confirmed: [LiveTranscriptSegment] = []
     private(set) var pending: [LiveTranscriptSegment] = []
