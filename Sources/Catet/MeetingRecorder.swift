@@ -13,8 +13,8 @@ final class MeetingRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @unchec
     private let audioQueue = DispatchQueue(label: "catet.system.audio")
     private let lifecycle = DispatchQueue(label: "catet.capture.lifecycle")
     private var micEngine: AVAudioEngine?
-    private var microphone: WaveWriter?
-    private var systemAudio: WaveWriter?
+    private var microphone: AudioWriter?
+    private var systemAudio: AudioWriter?
     private var systemBuffer: AVAudioPCMBuffer?
     private var generation = UUID()
     private var stream: SCStream?
@@ -81,7 +81,7 @@ final class MeetingRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @unchec
         let input = engine.inputNode
         let format = input.outputFormat(forBus: 0)
         guard format.channelCount > 0, format.sampleRate > 0 else { throw AudioError.capture("No microphone input is available.") }
-        let writer = try WaveWriter(url: directory.appendingPathComponent("microphone.wav"), source: format)
+        let writer = try AudioWriter(url: directory.appendingPathComponent("microphone.ogg"), source: format)
         try stateLock.withLock {
             guard generation == token, !stopped else { throw AudioError.capture("Recording stopped.") }
             microphone = writer; micEngine = engine; micRunning = true
@@ -135,7 +135,7 @@ final class MeetingRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @unchec
                       let description = CMSampleBufferGetFormatDescription(sampleBuffer),
                       let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(description),
                       let format = AVAudioFormat(streamDescription: asbd) else { return }
-                if systemAudio == nil { systemAudio = try WaveWriter(url: directory.appendingPathComponent("system.wav"), source: format) }
+                if systemAudio == nil { systemAudio = try AudioWriter(url: directory.appendingPathComponent("system.ogg"), source: format) }
                 guard let writer = systemAudio else { return }
                 let pts = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
                 guard pts.isFinite else { throw AudioError.capture("System audio timestamps are unavailable.") }

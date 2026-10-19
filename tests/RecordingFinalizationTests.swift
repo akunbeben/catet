@@ -48,18 +48,26 @@ struct RecordingFinalizationTests {
         defer { try? fm.removeItem(at: runtime) }
         try JSONSerialization.data(withJSONObject: ["command": ["/usr/bin/true"]])
             .write(to: temp.appendingPathComponent("hooks.json"))
-        let audio = temp.appendingPathComponent("fixture.wav")
+        let wav = temp.appendingPathComponent("fixture.wav")
         let makeAudio = Process()
         makeAudio.executableURL = URL(fileURLWithPath: ffmpegPath)
         makeAudio.arguments = ["-hide_banner", "-nostdin", "-v", "error", "-f", "lavfi", "-i",
                                "sine=frequency=440:sample_rate=48000:duration=1", "-ac", "1",
-                               "-c:a", "pcm_s16le", "-y", audio.path]
+                               "-c:a", "pcm_s16le", "-y", wav.path]
         try makeAudio.run()
         makeAudio.waitUntilExit()
         try check(makeAudio.terminationStatus == 0, "Real ffmpeg must create a valid WAV fixture")
+        let audio = temp.appendingPathComponent("fixture.ogg")
+        let encode = Process()
+        encode.executableURL = URL(fileURLWithPath: ffmpegPath)
+        encode.arguments = ["-hide_banner", "-nostdin", "-v", "error", "-i", wav.path, "-ac", "1",
+                           "-c:a", "libopus", "-b:a", "32k", "-f", "ogg", "-y", audio.path]
+        try encode.run()
+        encode.waitUntilExit()
+        try check(encode.terminationStatus == 0, "Real ffmpeg must create a valid Ogg Opus fixture")
         let audioData = try Data(contentsOf: audio)
         func savedAudio(_ meeting: Meeting) throws {
-            try audioData.write(to: meeting.directory.appendingPathComponent("microphone.wav"))
+            try audioData.write(to: meeting.directory.appendingPathComponent("microphone.ogg"))
         }
         func recording(_ title: String) throws -> Meeting {
             let meeting = try store.newMeeting(title: title, generateMoM: true)
@@ -87,7 +95,9 @@ struct RecordingFinalizationTests {
                   "Recovery must replace partial live output with the full saved-audio transcript")
         try check(fm.fileExists(atPath: recovered.directory.appendingPathComponent("microphone.ogg").path) &&
                   !fm.fileExists(atPath: recovered.directory.appendingPathComponent("microphone.wav").path),
-                  "Successful recovery must archive the original recording after transcription")
+                  "Saved Ogg Opus must remain the canonical recording after transcription")
+        try check(abs((store.recordingDuration(for: recovered) ?? 0) - 1) < 0.1,
+                  "Recording duration must be measured from the saved Ogg Opus")
         try check(stayedInProgress, "A provisional live failure must stay in progress until handoff")
         try check(!store.isLocallyProcessing(recovered.id), "Recovery must release the recording and engine reservations")
         try check(try MeetingHooks.status(root: root).map { $0["event"] as! String } == ["transcript.ready"],
@@ -108,9 +118,9 @@ struct RecordingFinalizationTests {
                   "Only the final batch failure must expose manual transcription retry")
         try check(failure.failureMessage?.contains("Retry transcription") == true,
                   "Final failure must give an actionable manual retry")
-        try check(try Data(contentsOf: failed.directory.appendingPathComponent("microphone.wav")) == audioData &&
-                  !fm.fileExists(atPath: failed.directory.appendingPathComponent("microphone.ogg").path),
-                  "Transcription failure must preserve source WAV without publishing an archive")
+        try check(try Data(contentsOf: failed.directory.appendingPathComponent("microphone.ogg")) == audioData &&
+                  !fm.fileExists(atPath: failed.directory.appendingPathComponent("microphone.wav").path),
+                  "Transcription failure must preserve the original Ogg Opus capture")
         try check(!store.isLocallyProcessing(failed.id), "Final failure must release reservations")
         try check(try MeetingHooks.status(root: root).filter { $0["event"] as? String == "processing.failed" }.count == 1,
                   "Live plus batch failure must publish exactly one final failure event")
@@ -123,18 +133,17 @@ struct RecordingFinalizationTests {
         }, cancelLive: { fatalError("A successful live transcription must not be cancelled") })
         try check(store.meeting(id: live.id)?.status == "transcribed" && !store.isLocallyProcessing(live.id),
                   "Successful live finalization must publish readiness and release its reservation")
-        try "processing sentinel".write(to: live.directory.appendingPathComponent("processing.log"), atomically: true, encoding: .utf8)
-        let compactResult: Result<Void, Error> = await withCheckedContinuation { continuation in
-            store.runEngine(meeting: live, command: "compact", transcriptOnly: true) { continuation.resume(returning: $0) }
-        }
-        try compactResult.get()
-        try check(fm.fileExists(atPath: live.directory.appendingPathComponent("microphone.ogg").path) &&
+        try check(try Data(contentsOf: live.directory.appendingPathComponent("microphone.ogg")) == audioData &&
                   !fm.fileExists(atPath: live.directory.appendingPathComponent("microphone.wav").path),
-                  "The store compact command must publish archived audio")
-        try check(try String(contentsOf: live.directory.appendingPathComponent("processing.log")) == "processing sentinel" &&
-                  fm.fileExists(atPath: live.directory.appendingPathComponent("compression.log").path),
-                  "Compaction must use its dedicated log without overwriting processing diagnostics")
-        try check(try String(contentsOf: calls) == "attempt\nattempt\n", "Successful live transcription must not trigger batch processing")
-        print("PASS: Successful live finalization avoids unnecessary batch transcription")
+                  "Successful live transcription must retain direct Ogg capture without post-recording compaction")
+        try check(try String(contentsOf: calls) == "attempt\nattempt\n", "Successful live finalization must not trigger batch processing")
+        let interrupted = try store.newMeeting(title: "Recover interrupted Ogg capture")
+        try savedAudio(interrupted)
+        let recoveredState = store.loadAndRecover().first { $0.id == interrupted.id }
+        try check(recoveredState?.status == "recorded" && recoveredState?.error?.contains("Available audio was preserved") == true,
+                  "Interrupted direct Ogg capture must be recoverable from its published pages")
+        try check(abs((store.recordingDuration(for: interrupted) ?? 0) - 1) < 0.1,
+                  "Interrupted Ogg capture must retain a measurable duration")
+        print("PASS: Direct Ogg live and batch finalization preserve capture, publish hooks, and recover interrupted audio")
     }
 }

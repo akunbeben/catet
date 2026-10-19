@@ -16,10 +16,25 @@ struct AudioRegressionTests {
         let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 160)!
         buffer.frameLength = 160
         for frame in 0..<160 {
-            buffer.floatChannelData![0][frame] = 0.5
-            buffer.floatChannelData![1][frame] = -0.25
+            let sample = Float(sin(Double(frame) * 2 * .pi * 400 / 16000))
+            buffer.floatChannelData![0][frame] = 0.5 * sample
+            buffer.floatChannelData![1][frame] = -0.25 * sample
         }
         return buffer
+    }
+    static func decodedMono(_ input: URL, root: URL) throws -> [Float] {
+        let output = root.appendingPathComponent("decoded-\(UUID().uuidString).f32")
+        let process = Process()
+        process.executableURL = try RuntimeConfig.load().ffmpeg
+        process.arguments = ["-hide_banner", "-loglevel", "error", "-y", "-i", input.path,
+                             "-f", "f32le", "-ac", "1", "-ar", "32000", output.path]
+        try process.run()
+        process.waitUntilExit()
+        try check(process.terminationStatus == 0, "Ogg Opus output must decode successfully")
+        let data = try Data(contentsOf: output)
+        return data.withUnsafeBytes { bytes in
+            Array(bytes.bindMemory(to: Float.self))
+        }
     }
     static func childSeesMeetingLock(root: URL, meetingID: String) throws -> Bool {
         let process = Process()
@@ -101,41 +116,103 @@ struct AudioRegressionTests {
             guard let meeting = store.meeting(id: CommandLine.arguments[3]) else { _exit(2) }
             _exit(store.isProcessRunning(for: meeting) ? 0 : 1)
         }
+        if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--encoder-failure" {
+            do {
+                let input = buffer()
+                let writer = try AudioWriter(url: URL(fileURLWithPath: CommandLine.arguments[2]), source: input.format)
+                for _ in 0..<100 { try writer.append(input) }
+                try writer.finish()
+                _exit(3)
+            } catch is AudioError { _exit(0) }
+        }
         if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--write-and-crash" {
             let input = buffer()
-            let writer = try WaveWriter(url: URL(fileURLWithPath: CommandLine.arguments[2]), source: input.format)
-            try writer.append(input)
-            _exit(0) // No deinit, close, or finalization. Exercise actual crash recovery.
+            let writer = try AudioWriter(url: URL(fileURLWithPath: CommandLine.arguments[2]), source: input.format)
+            for _ in 0..<100 { try writer.append(input) }
+            _exit(0) // The inherited stdin close must make ffmpeg finalize its Ogg stream.
         }
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("catet-audio-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
-        let path = root.appendingPathComponent("microphone.wav")
-        let source = buffer()
-        let writer = try WaveWriter(url: path, source: source.format)
-        try writer.pad(to: 800)
-        try writer.append(source)
-        try writer.append(source, skipping: 80)
-        // Read the live file before finish. Header must already describe real samples.
-        let live = try AVAudioFile(forReading: path)
-        try check(live.length == 1040, "Leading silence and overlap trimming must preserve the recording timeline")
-        let output = AVAudioPCMBuffer(pcmFormat: live.processingFormat, frameCapacity: 1040)!
-        try live.read(into: output)
-        try check(abs(output.floatChannelData![0][0]) < 0.0001, "Timestamp gap must contain silence")
-        try check(abs(output.floatChannelData![0][800] - 0.5) < 0.001, "Left microphone channel must survive PCM conversion")
-        try check(abs(output.floatChannelData![1][800] + 0.25) < 0.001, "Right microphone channel must survive interleaving")
-        try writer.finish()
-        print("PASS: Live WAV headers, channel conversion, timeline padding and overlap trimming")
+        for (name, body) in [
+            ("exits-before-input", "exit 7"),
+            ("fails-on-finalize", "/bin/cat >/dev/null\\nexit 7")
+        ] {
+            let directory = root.appendingPathComponent(name)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let executable = directory.appendingPathComponent("audio-tests")
+            try FileManager.default.copyItem(at: URL(fileURLWithPath: CommandLine.arguments[0]), to: executable)
+            let encoder = directory.appendingPathComponent("encoder")
+            try ("#!/bin/sh\n" + body.replacingOccurrences(of: "\\n", with: "\n") + "\n")
+                .write(to: encoder, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: encoder.path)
+            let config = ["ffmpeg": encoder.path, "whisper": "/unused", "model": "/unused",
+                          "vad": "/unused", "codex": "/unused"]
+            try JSONSerialization.data(withJSONObject: config).write(to: directory.appendingPathComponent("runtime.json"))
+            let child = Process()
+            child.executableURL = executable
+            child.arguments = ["--encoder-failure", directory.appendingPathComponent("microphone.ogg").path]
+            try child.run()
+            child.waitUntilExit()
+            try check(child.terminationReason == .exit && child.terminationStatus == 0,
+                      "Encoder termination and finalization failures must surface as errors without a SIGPIPE crash")
+        }
+        print("PASS: Encoder termination and finalization failures remain truthful and SIGPIPE-safe")
 
-        let crashed = root.appendingPathComponent("interrupted.wav")
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL
-        process.arguments = ["--write-and-crash", crashed.path]
-        try process.run(); process.waitUntilExit()
-        try check(process.terminationStatus == 0, "Crash fixture writer must complete its append")
-        let recovered = try AVAudioFile(forReading: crashed)
-        try check(recovered.length == 160, "Audio must remain readable after process exit without finalization")
-        print("PASS: Recording remains readable after unclean process exit")
+        for channels: AVAudioChannelCount in [1, 2, 4, 6] {
+            let layout = AVAudioChannelLayout(layoutTag: kAudioChannelLayoutTag_DiscreteInOrder | channels)!
+            let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 48000,
+                                       interleaved: false, channelLayout: layout)
+            let input = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 480)!
+            input.frameLength = 480
+            for channel in 0..<Int(channels) {
+                for frame in 0..<480 {
+                    input.floatChannelData![channel][frame] = Float(sin(Double(frame) * 2 * .pi * 400 / 48000)) * 0.1
+                }
+            }
+            let path = root.appendingPathComponent("channels-\(channels).ogg")
+            let writer = try AudioWriter(url: path, source: format)
+            try writer.append(input)
+            try writer.finish()
+            try check(try AudioFile.frameCount(at: path) == 480, "Opus output must preserve the exact multichannel recording duration")
+            let samples = try decodedMono(path, root: root)
+            let energy = samples.reduce(0.0) { $0 + Double($1 * $1) } / Double(samples.count)
+            try check(energy > 0.001 && energy < 0.03, "Multichannel capture must retain the recorded signal after Opus downmix")
+        }
+        print("PASS: Mono, stereo and multichannel inputs encode to mono Opus")
+
+        let path = root.appendingPathComponent("microphone.ogg")
+        let source = buffer()
+        let writer = try AudioWriter(url: path, source: source.format)
+        try writer.pad(to: 16_000)
+        for _ in 0..<100 { try writer.append(source) }
+        try check(try AudioFile.frameCount(at: path) > 0, "Complete Ogg pages must be readable before finish")
+        for _ in 0..<100 { try writer.append(source) }
+        try writer.append(source, skipping: 80)
+        try writer.finish()
+        let duration = try AudioFile.duration(at: path)
+        try check(abs(duration - 3.005) < 0.08, "Silence padding and overlap trimming must preserve the recording timeline")
+        let samples = try decodedMono(path, root: root)
+        try check(samples.prefix(1000).allSatisfy { abs($0) < 0.03 }, "Timestamp gaps must decode as silence")
+        try check(samples.dropFirst(8000).contains { $0 > 0.1 }, "Captured microphone audio must survive Opus encoding")
+        print("PASS: Early Ogg pages, silence padding, overlap trimming and lossy audio")
+
+        let crashed = root.appendingPathComponent("interrupted.ogg")
+        let child = Process()
+        child.executableURL = URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL
+        child.arguments = ["--write-and-crash", crashed.path]
+        try child.run()
+        child.waitUntilExit()
+        try check(child.terminationStatus == 0, "Crash fixture writer must complete its append")
+        var recoveredFrames: Int64 = 0
+        let recoveryDeadline = Date().addingTimeInterval(5)
+        while Date() < recoveryDeadline {
+            recoveredFrames = (try? AudioFile.frameCount(at: crashed)) ?? 0
+            if recoveredFrames == 48_000 { break }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        try check(abs(Double(recoveredFrames) / 48_000 - 1) < 0.08, "Encoder must finalize all already-written audio after parent exit")
+        print("PASS: Interrupted recording retains finalized Opus pages")
 
         setenv("CATET_MEETINGS_ROOT", root.appendingPathComponent("meetings").path, 1)
         let store = MeetingStore()
@@ -187,15 +264,15 @@ struct AudioRegressionTests {
         try check(ShortRecordingDialog(duration: 0.2) != nil && ShortRecordingDialog(duration: 3) != nil, "Short captures through three seconds must offer a discard choice")
         try check(ShortRecordingDialog(duration: 3.001) == nil && ShortRecordingDialog(duration: 0) == nil && ShortRecordingDialog(duration: nil) == nil, "Long or unknown durations must not be marked as accidental")
         let short = try store.newMeeting(title: "Short recording fixture")
-        let shortAudio = try WaveWriter(url: short.directory.appendingPathComponent("microphone.wav"), source: source.format)
+        let shortAudio = try AudioWriter(url: short.directory.appendingPathComponent("microphone.ogg"), source: source.format)
         try shortAudio.pad(to: 48_000)
         try shortAudio.finish()
         try store.update(id: short.id) { $0.status = "recorded"; $0.error = nil }
-        try check(store.recordingDuration(for: short) == 3, "Duration must use finalized audio frames")
-        let longerChannel = try WaveWriter(url: short.directory.appendingPathComponent("system.wav"), source: source.format)
+        try check(abs((store.recordingDuration(for: short) ?? 0) - 3) < 0.08, "Duration must use finalized audio frames")
+        let longerChannel = try AudioWriter(url: short.directory.appendingPathComponent("system.ogg"), source: source.format)
         try longerChannel.pad(to: 64_000)
         try longerChannel.finish()
-        try check(store.recordingDuration(for: short) == 4, "The longer channel must prevent misclassifying a recording as short")
+        try check(abs((store.recordingDuration(for: short) ?? 0) - 4) < 0.08, "The longer channel must prevent misclassifying a recording as short")
 
         let lockDirectory = root.appendingPathComponent("runtime/locks")
         try FileManager.default.createDirectory(at: lockDirectory, withIntermediateDirectories: true)
@@ -211,7 +288,7 @@ struct AudioRegressionTests {
         let trashed = try store.moveToTrash(ids: [short.id], onlyUnprocessedRecordings: true).first
         defer { if let trashed { try? FileManager.default.removeItem(at: trashed) } }
         try check(!FileManager.default.fileExists(atPath: short.directory.path), "Discard must remove the recording from the library")
-        try check(trashed != nil && FileManager.default.fileExists(atPath: trashed!.appendingPathComponent("microphone.wav").path), "Discard must preserve recoverable audio in Trash")
+        try check(trashed != nil && FileManager.default.fileExists(atPath: trashed!.appendingPathComponent("microphone.ogg").path), "Discard must preserve recoverable audio in Trash")
         try check(store.meeting(id: meeting.id) != nil, "Discard must leave other recordings untouched")
         print("PASS: Short-duration boundaries, channel duration, active-recording protection and recoverable discard")
 

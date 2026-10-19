@@ -180,7 +180,9 @@ final class MeetingStore {
                 if isLocallyProcessing(all[i].id) { continue }
                 all[i].status = "recorded"
                 if !["microphone.wav", "system.wav", "microphone.ogg", "system.ogg"].contains(where: {
-                    fm.fileExists(atPath: all[i].directory.appendingPathComponent($0).path)
+                    let path = all[i].directory.appendingPathComponent($0)
+                    guard fm.fileExists(atPath: path.path) else { return false }
+                    return path.pathExtension == "wav" || ((try? AudioFile.frameCount(at: path)) ?? 0) > 0
                 }) {
                     all[i].error = "The app stopped before audio was finalized. No complete recording is available."
                 } else { all[i].error = "Catet restarted during recording. Available audio was preserved; retry transcription to continue." }
@@ -203,11 +205,15 @@ final class MeetingStore {
         try write(m, in: dir)
     }
     func recordingDuration(for meeting: Meeting) -> TimeInterval? {
-        ["microphone.wav", "system.wav"].compactMap { name -> TimeInterval? in
-            guard let audio = try? AVAudioFile(forReading: meeting.directory.appendingPathComponent(name)),
+        let directory = meeting.directory
+        let durations = ["microphone.ogg", "system.ogg"].compactMap { name in
+            try? AudioFile.duration(at: directory.appendingPathComponent(name))
+        } + ["microphone.wav", "system.wav"].compactMap { name -> TimeInterval? in
+            guard let audio = try? AVAudioFile(forReading: directory.appendingPathComponent(name)),
                   audio.processingFormat.sampleRate > 0 else { return nil }
             return Double(audio.length) / audio.processingFormat.sampleRate
-        }.max()
+        }
+        return durations.max()
     }
 
     @discardableResult

@@ -1,6 +1,4 @@
 import Foundation
-import AVFoundation
-import Darwin
 
 struct LiveTranscriptSegment: Codable, Equatable, Sendable {
     let start: Double
@@ -95,7 +93,7 @@ struct LiveSegmentConfirmation {
     var allSegments: [LiveTranscriptSegment] { confirmed + pending }
 }
 
-/// Reads the checkpointed PCM WAV files written by WaveWriter and produces bounded 16 kHz mono windows.
+/// Reads complete pages from the growing Ogg Opus capture files into bounded 16 kHz windows.
 final class LiveAudioMixer {
     static let outputSampleRate = 16_000
 
@@ -118,12 +116,12 @@ final class LiveAudioMixer {
 
     private let microphoneURL: URL
     private let systemURL: URL
-    private var microphone: LiveWAVSource?
-    private var system: LiveWAVSource?
+    private var microphone: LiveAudioSource?
+    private var system: LiveAudioSource?
 
     init(directory: URL) {
-        microphoneURL = directory.appendingPathComponent("microphone.wav")
-        systemURL = directory.appendingPathComponent("system.wav")
+        microphoneURL = directory.appendingPathComponent("microphone.ogg")
+        systemURL = directory.appendingPathComponent("system.ogg")
     }
 
     func availableFrameCount() throws -> Int64 {
@@ -139,20 +137,20 @@ final class LiveAudioMixer {
         try refreshSources()
         let available = max(microphone?.outputFrameCount ?? 0, system?.outputFrameCount ?? 0)
         guard endFrame <= available else {
-            throw LiveTranscriptionError.audio("The checkpointed WAV does not yet contain the requested samples.")
+            throw LiveTranscriptionError.audio("The Ogg recording does not yet contain the requested samples.")
         }
         let frameCount = Int(endFrame - startFrame)
         guard frameCount > 0 else { return [] }
 
-        let mic = try microphone?.samples(fromOutputFrame: startFrame, count: frameCount) ?? []
-        let system = try system?.samples(fromOutputFrame: startFrame, count: frameCount) ?? []
         let micAvailable = microphone?.outputFrameCount ?? 0
-        let systemAvailable = self.system?.outputFrameCount ?? 0
+        let systemAvailable = system?.outputFrameCount ?? 0
+        let mic = try microphone?.samples(fromOutputFrame: startFrame, count: frameCount) ?? []
+        let system = try self.system?.samples(fromOutputFrame: startFrame, count: frameCount) ?? []
         var mixed = [Float](repeating: 0, count: frameCount)
         for index in 0..<frameCount {
             let frame = startFrame + Int64(index)
-            let hasMic = frame < micAvailable && !mic.isEmpty
-            let hasSystem = frame < systemAvailable && !system.isEmpty
+            let hasMic = frame < micAvailable && index < mic.count
+            let hasSystem = frame < systemAvailable && index < system.count
             if hasMic && hasSystem {
                 mixed[index] = min(1, max(-1, (mic[index] + system[index]) * 0.5))
             } else if hasMic {
@@ -166,168 +164,138 @@ final class LiveAudioMixer {
 
     private func refreshSources() throws {
         if microphone == nil, FileManager.default.fileExists(atPath: microphoneURL.path) {
-            microphone = try LiveWAVSource(url: microphoneURL)
+            microphone = LiveAudioSource(url: microphoneURL)
         }
         if system == nil, FileManager.default.fileExists(atPath: systemURL.path) {
-            system = try LiveWAVSource(url: systemURL)
+            system = LiveAudioSource(url: systemURL)
         }
         try microphone?.refresh()
         try system?.refresh()
     }
 }
 
-private final class LiveWAVSource {
-    private static let headerSize: Int64 = 44
+private final class LiveAudioSource {
+    private static let maximumDiagnosticBytes = 16 * 1024
+
     private let url: URL
-    private let descriptor: Int32
-    private var channels = 0
-    private var sampleRate = 0
-    private var bytesPerFrame = 0
-    private(set) var frameCount: Int64 = 0
+    private var publishedFrames: Int64 = 0
 
     var outputFrameCount: Int64 {
-        guard sampleRate > 0 else { return 0 }
-        return (frameCount * Int64(LiveAudioMixer.outputSampleRate) + Int64(sampleRate) - 1) / Int64(sampleRate)
+        // Match FFmpeg's nearest-sample resampling at the final Opus granule.
+        (publishedFrames * Int64(LiveAudioMixer.outputSampleRate) + 24_000) / 48_000
     }
 
-    init(url: URL) throws {
-        self.url = url
-        descriptor = url.path.withCString { Darwin.open($0, O_RDONLY) }
-        guard descriptor >= 0 else {
-            throw LiveTranscriptionError.audio("Could not open \(url.lastPathComponent): \(String(cString: strerror(errno)))")
-        }
-        do { try refresh() }
-        catch { Darwin.close(descriptor); throw error }
-    }
-
-    deinit { Darwin.close(descriptor) }
+    init(url: URL) { self.url = url }
 
     func refresh() throws {
-        var info = stat()
-        guard fstat(descriptor, &info) == 0 else { throw ioError("Could not inspect") }
-        let fileSize = Int64(info.st_size)
-        guard fileSize >= Self.headerSize else { return }
-
-        var header = [UInt8](repeating: 0, count: Int(Self.headerSize))
-        let headerRead = header.withUnsafeMutableBytes { Darwin.pread(descriptor, $0.baseAddress!, $0.count, 0) }
-        guard headerRead == header.count else { throw ioError("Could not read WAV header") }
-        guard String(bytes: header[0..<4], encoding: .ascii) == "RIFF",
-              String(bytes: header[8..<12], encoding: .ascii) == "WAVE",
-              String(bytes: header[12..<16], encoding: .ascii) == "fmt ",
-              String(bytes: header[36..<40], encoding: .ascii) == "data" else {
-            throw LiveTranscriptionError.audio("\(url.lastPathComponent) has an unsupported WAV header.")
-        }
-
-        let format = Self.uint16(header, at: 20)
-        let channelCount = Int(Self.uint16(header, at: 22))
-        let rate = Int(Self.uint32(header, at: 24))
-        let bitsPerSample = Int(Self.uint16(header, at: 34))
-        guard format == 1, channelCount > 0, rate > 0, bitsPerSample == 16 else {
-            throw LiveTranscriptionError.audio("\(url.lastPathComponent) must contain 16-bit PCM samples.")
-        }
-        channels = channelCount
-        sampleRate = rate
-        bytesPerFrame = channelCount * 2
-        let reportedDataBytes = Int64(Self.uint32(header, at: 40))
-        let readableDataBytes = max(0, fileSize - Self.headerSize)
-        frameCount = min(reportedDataBytes, readableDataBytes) / Int64(bytesPerFrame)
+        publishedFrames = try AudioFile.frameCount(at: url)
     }
 
     func samples(fromOutputFrame startFrame: Int64, count: Int) throws -> [Float] {
-        guard count > 0, frameCount > 0 else { return [] }
-        let rate = Double(sampleRate)
-        let firstRequestedSourceFrame = startFrame * Int64(sampleRate) / Int64(LiveAudioMixer.outputSampleRate)
-        guard firstRequestedSourceFrame < frameCount else { return [] }
-        let lastOutputFrame = startFrame + Int64(count) - 1
-        let lastRequestedSourceFrame = min(frameCount - 1,
-                                           lastOutputFrame * Int64(sampleRate) / Int64(LiveAudioMixer.outputSampleRate) + 1)
-        let sourceStartFrame = max(0, firstRequestedSourceFrame - 128)
-        let sourceEndFrame = min(frameCount, lastRequestedSourceFrame + 129)
-        let sourceFrameCount = Int(sourceEndFrame - sourceStartFrame)
-        let byteCount = sourceFrameCount * bytesPerFrame
-        var data = Data(count: byteCount)
-        try data.withUnsafeMutableBytes { (raw: UnsafeMutableRawBufferPointer) in
-            guard let base = raw.baseAddress else { throw ioError("Could not allocate WAV samples") }
-            var offset = 0
-            while offset < byteCount {
-                let result = Darwin.pread(descriptor, base.advanced(by: offset), byteCount - offset,
-                                          off_t(Self.headerSize + sourceStartFrame * Int64(bytesPerFrame) + Int64(offset)))
-                if result < 0 && errno == EINTR { continue }
-                guard result > 0 else { throw ioError("Could not read WAV samples") }
-                offset += result
-            }
+        guard count > 0, startFrame < outputFrameCount else { return [] }
+        let availableCount = min(Int64(count), outputFrameCount - startFrame)
+        let exactCount = Int(availableCount)
+        let seconds = Double(startFrame) / Double(LiveAudioMixer.outputSampleRate)
+        let duration = Double(exactCount) / Double(LiveAudioMixer.outputSampleRate)
+        let seekStart = max(0, seconds - 0.12)
+        let ffmpeg: URL
+        do {
+            ffmpeg = try RuntimeConfig.load().ffmpeg
+        } catch {
+            throw LiveTranscriptionError.audio("Could not locate FFmpeg to decode \(url.lastPathComponent): \(error.localizedDescription)")
         }
 
-        guard let inputFormat = AVAudioFormat(standardFormatWithSampleRate: rate, channels: 1),
-              let outputFormat = AVAudioFormat(standardFormatWithSampleRate: Double(LiveAudioMixer.outputSampleRate), channels: 1),
-              let converter = AVAudioConverter(from: inputFormat, to: outputFormat),
-              let input = AVAudioPCMBuffer(pcmFormat: inputFormat, frameCapacity: AVAudioFrameCount(sourceFrameCount)),
-              let output = AVAudioPCMBuffer(
-                pcmFormat: outputFormat,
-                frameCapacity: AVAudioFrameCount(ceil(Double(sourceFrameCount) * Double(LiveAudioMixer.outputSampleRate) / rate) + 256)
-              ) else {
-            throw LiveTranscriptionError.audio("Could not create an audio resampler for \(url.lastPathComponent).")
-        }
+        let process = Process()
+        let output = Pipe()
+        let errors = Pipe()
+        process.executableURL = ffmpeg
+        // Decode bounded preroll to restore Opus state, then trim to the exact requested time.
+        process.arguments = [
+            "-hide_banner", "-nostdin", "-v", "error",
+            "-ss", String(format: "%.9f", seekStart), "-i", url.path,
+            "-ss", String(format: "%.9f", seconds - seekStart),
+            "-t", String(format: "%.9f", duration),
+            "-map", "0:a:0", "-vn", "-ac", "1", "-ar", "16000",
+            "-c:a", "pcm_f32le", "-f", "f32le", "pipe:1"
+        ]
+        process.standardOutput = output
+        process.standardError = errors
 
-        input.frameLength = AVAudioFrameCount(sourceFrameCount)
-        guard let destination = input.floatChannelData?[0] else {
-            throw LiveTranscriptionError.audio("Could not allocate an input audio buffer for \(url.lastPathComponent).")
+        let diagnosticLock = NSLock()
+        var diagnostics = Data()
+        let drained = DispatchSemaphore(value: 0)
+        do {
+            try process.run()
+        } catch {
+            output.fileHandleForReading.closeFile()
+            output.fileHandleForWriting.closeFile()
+            errors.fileHandleForReading.closeFile()
+            errors.fileHandleForWriting.closeFile()
+            throw LiveTranscriptionError.audio("Could not start FFmpeg for \(url.lastPathComponent): \(error.localizedDescription)")
         }
-        data.withUnsafeBytes { raw in
-            let bytes = raw.bindMemory(to: UInt8.self)
-            for frame in 0..<sourceFrameCount {
-                var sum: Float = 0
-                for channel in 0..<channels {
-                    let offset = frame * bytesPerFrame + channel * 2
-                    let word = UInt16(bytes[offset]) | (UInt16(bytes[offset + 1]) << 8)
-                    sum += Float(Int16(bitPattern: word)) / 32768
+        output.fileHandleForWriting.closeFile()
+        errors.fileHandleForWriting.closeFile()
+        DispatchQueue.global(qos: .utility).async {
+            let handle = errors.fileHandleForReading
+            while true {
+                let data = handle.availableData
+                if data.isEmpty { break }
+                diagnosticLock.lock()
+                if diagnostics.count < Self.maximumDiagnosticBytes {
+                    diagnostics.append(data.prefix(Self.maximumDiagnosticBytes - diagnostics.count))
                 }
-                destination[frame] = sum / Float(channels)
+                diagnosticLock.unlock()
             }
+            drained.signal()
         }
-        converter.primeMethod = .none
-        var inputProvided = false
-        var conversionError: NSError?
-        let status = converter.convert(to: output, error: &conversionError) { _, inputStatus in
-            guard !inputProvided else {
-                inputStatus.pointee = .endOfStream
-                return nil
+
+        let maximumOutputBytes = exactCount * MemoryLayout<Float>.size + 4_096
+        var decoded = Data()
+        var exceededOutputLimit = false
+        do {
+            let handle = output.fileHandleForReading
+            while let chunk = try handle.read(upToCount: 16 * 1024), !chunk.isEmpty {
+                guard !exceededOutputLimit else { continue }
+                guard decoded.count + chunk.count <= maximumOutputBytes else {
+                    exceededOutputLimit = true
+                    if process.isRunning { process.terminate() }
+                    continue
+                }
+                decoded.append(chunk)
             }
-            inputProvided = true
-            inputStatus.pointee = .haveData
-            return input
+        } catch {
+            if process.isRunning { process.terminate() }
+            process.waitUntilExit()
+            drained.wait()
+            throw LiveTranscriptionError.audio("Could not read FFmpeg output for \(url.lastPathComponent): \(error.localizedDescription)")
         }
-        guard status != .error else {
-            let reason = conversionError?.localizedDescription ?? "unknown conversion error"
-            throw LiveTranscriptionError.audio("Could not resample \(url.lastPathComponent): \(reason)")
+        process.waitUntilExit()
+        drained.wait()
+        guard !exceededOutputLimit else {
+            throw LiveTranscriptionError.audio("FFmpeg returned excessive audio data for \(url.lastPathComponent).")
         }
-        guard let converted = output.floatChannelData?[0], output.frameLength > 0 else {
-            throw LiveTranscriptionError.audio("The resampler returned no samples for \(url.lastPathComponent).")
+        guard process.terminationReason == .exit, process.terminationStatus == 0 else {
+            diagnosticLock.lock()
+            let message = String(decoding: diagnostics, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+            diagnosticLock.unlock()
+            let detail = message.isEmpty ? "FFmpeg exited with status \(process.terminationStatus)." : message
+            throw LiveTranscriptionError.audio("Could not decode \(url.lastPathComponent): \(detail)")
         }
-
-        let convertedCount = Int(output.frameLength)
-        let convertedStart = Double(sourceStartFrame) * Double(LiveAudioMixer.outputSampleRate) / rate
-        var outputSamples = [Float](repeating: 0, count: count)
-        for index in 0..<count {
-            let position = Double(startFrame + Int64(index)) - convertedStart
-            let lower = Int(floor(position))
-            guard lower >= 0, lower < convertedCount else { continue }
-            let upper = min(lower + 1, convertedCount - 1)
-            let fraction = Float(position - Double(lower))
-            outputSamples[index] = converted[lower] + (converted[upper] - converted[lower]) * fraction
+        guard decoded.count % MemoryLayout<Float>.size == 0 else {
+            throw LiveTranscriptionError.audio("FFmpeg returned incomplete samples for \(url.lastPathComponent).")
         }
-        return outputSamples
-    }
-
-    private func ioError(_ operation: String) -> LiveTranscriptionError {
-        .audio("\(operation) \(url.lastPathComponent): \(String(cString: strerror(errno)))")
-    }
-
-    private static func uint16(_ bytes: [UInt8], at offset: Int) -> UInt16 {
-        UInt16(bytes[offset]) | (UInt16(bytes[offset + 1]) << 8)
-    }
-
-    private static func uint32(_ bytes: [UInt8], at offset: Int) -> UInt32 {
-        UInt32(bytes[offset]) | (UInt32(bytes[offset + 1]) << 8) | (UInt32(bytes[offset + 2]) << 16) | (UInt32(bytes[offset + 3]) << 24)
+        let sampleCount = decoded.count / MemoryLayout<Float>.size
+        guard sampleCount > 0 else {
+            throw LiveTranscriptionError.audio("FFmpeg returned no samples for \(url.lastPathComponent).")
+        }
+        let samples = decoded.withUnsafeBytes { raw in
+            Array(raw.bindMemory(to: Float.self))
+        }
+        guard sampleCount >= exactCount else {
+            throw LiveTranscriptionError.audio(
+                "FFmpeg decoded only \(sampleCount) of \(exactCount) requested samples from \(url.lastPathComponent)."
+            )
+        }
+        return sampleCount == exactCount ? samples : Array(samples.prefix(exactCount))
     }
 }

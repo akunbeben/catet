@@ -42,40 +42,6 @@ struct MeetingSegment: Equatable {
     var jsonObject: [String: Any] { ["start": start, "end": end, "text": text] }
 }
 
-struct RuntimeConfig {
-    let ffmpeg: URL
-    let whisper: URL
-    let model: URL
-    let vad: URL
-    let codex: URL
-
-    static func load() throws -> RuntimeConfig {
-        let executableDirectory = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath().deletingLastPathComponent()
-        let candidates = [
-            executableDirectory.appendingPathComponent("../Resources/runtime.json").standardizedFileURL,
-            executableDirectory.appendingPathComponent("runtime.json"),
-            executableDirectory.deletingLastPathComponent().appendingPathComponent("runtime.json")
-        ]
-        guard let configURL = candidates.first(where: { FileManager.default.fileExists(atPath: $0.path) }) else {
-            throw EngineError("runtime.json was not found in the app Resources directory or beside the development executable.")
-        }
-        let data: Data
-        do { data = try Data(contentsOf: configURL) }
-        catch { throw EngineError("Cannot read \(configURL.path): \(error)") }
-        let object: Any
-        do { object = try JSONSerialization.jsonObject(with: data) }
-        catch { throw EngineError("Cannot parse \(configURL.path): \(error)") }
-        guard let raw = object as? [String: Any] else { throw EngineError("runtime.json must contain a JSON object.") }
-        func path(_ key: String) throws -> URL {
-            guard let value = raw[key] as? String, !value.isEmpty else {
-                throw EngineError("runtime.json must define an absolute \(key) path.")
-            }
-            guard value.hasPrefix("/") else { throw EngineError("runtime.json \(key) path must be absolute: \(value)") }
-            return URL(fileURLWithPath: value)
-        }
-        return try RuntimeConfig(ffmpeg: path("ffmpeg"), whisper: path("whisper"), model: path("model"), vad: path("vad"), codex: path("codex"))
-    }
-}
 
 func readMetadata(from directory: URL) throws -> [String: Any] {
     let path = directory.appendingPathComponent("meeting.json")
@@ -761,7 +727,7 @@ private func discoverAudio(in directory: URL) throws -> (channels: [URL], import
         let selected = imports.first!
         return ([], [selected])
     }
-    throw EngineError("No microphone.wav, system.wav, or imported input audio was found.")
+    throw EngineError("No microphone, system, or imported audio recording was found.")
 }
 
 private func prepareAudio(in directory: URL, config: RuntimeConfig) throws -> URL {
@@ -1073,8 +1039,12 @@ func processMeeting(_ directory: URL, root: URL, withMom: Bool, config: RuntimeC
         do { try transcribe(meeting, config: config) }
         catch { recordFailure(meeting, step: "transcribe", error: error); throw error }
     }
-    do { try compactAudio(in: meeting, config: config) }
-    catch { recordFailure(meeting, step: "compact", error: error); throw error }
+    if ["microphone.wav", "system.wav", "input.wav"].contains(where: {
+        FileManager.default.fileExists(atPath: meeting.appendingPathComponent($0).path)
+    }) {
+        do { try compactAudio(in: meeting, config: config) }
+        catch { recordFailure(meeting, step: "compact", error: error); throw error }
+    }
     _ = try updateStatus(in: meeting, status: "transcribed", values: [
         "error": NSNull(), "error_kind": NSNull(), "retry_at": NSNull(), "failed_step": NSNull()
     ])

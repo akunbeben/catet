@@ -78,7 +78,7 @@ actor LiveTranscription {
         guard finished else { throw LiveTranscriptionError.inference("Final transcription did not complete.") }
     }
 
-    /// Waits for transcription to stop and removes previews without touching recorded WAVs.
+    /// Waits for transcription to stop and removes previews without touching recorded audio.
     func cancel() async {
         guard !finished else { return }
         cancelled = true

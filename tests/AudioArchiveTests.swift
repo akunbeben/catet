@@ -61,6 +61,23 @@ struct AudioArchiveTests {
             guard result.0 == 0 else { throw AudioArchiveFailure(message: "Archived Opus did not fully decode: \(result.1)") }
             return try Data(contentsOf: output).count
         }
+        let captured = try meeting("direct-ogg-capture")
+        let capturedOgg = captured.appendingPathComponent("microphone.ogg")
+        let capturedSource = temp.appendingPathComponent("captured-source.wav")
+        let createCapture = try run(ffmpeg, ["-v", "error", "-f", "lavfi", "-i", "sine=frequency=620:sample_rate=48000:duration=2", "-ac", "1", "-c:a", "pcm_s16le", capturedSource.path, "-y"])
+        guard createCapture.0 == 0 else { throw AudioArchiveFailure(message: "Could not generate direct-capture source: \(createCapture.1)") }
+        let encodeCapture = try run(ffmpeg, ["-v", "error", "-i", capturedSource.path, "-ac", "1", "-c:a", "libopus", "-b:a", "32k", "-f", "ogg", capturedOgg.path, "-y"])
+        guard encodeCapture.0 == 0 else { throw AudioArchiveFailure(message: "Could not generate direct Ogg capture fixture: \(encodeCapture.1)") }
+        try FileManager.default.removeItem(at: capturedSource)
+        try Data("transient processing file".utf8).write(to: captured.appendingPathComponent("audio.wav"))
+        let capturedBefore = try Data(contentsOf: capturedOgg)
+        try check(try compact(captured) == 0, "Direct Ogg capture must pass engine archive lifecycle")
+        try check(try Data(contentsOf: capturedOgg) == capturedBefore && !exists(captured, "microphone.wav"),
+                  "Direct Ogg capture must remain unchanged without archive conversion or WAV capture")
+        try check(!exists(captured, "audio.wav"), "Processing intermediary cleanup must remove transient audio.wav")
+        try check(try decodedSampleBytes(captured, "microphone.ogg") == 192000,
+                  "Direct Ogg capture must remain fully decodable")
+        print("PASS: Direct Ogg capture remains canonical through engine archive lifecycle")
 
         let recovered = try meeting("mixed-recovery")
         try makeWav(recovered, "microphone.wav", "440")
