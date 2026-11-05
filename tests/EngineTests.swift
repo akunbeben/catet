@@ -77,13 +77,16 @@ struct EngineRegressionTests {
         try Data("Mailcow: mail server tim.\n".utf8).write(to: knowledge)
         try KnowledgeBase.setPath(knowledge, root: root)
         let word = original[0].text.split(separator: " ").first.map(String.init) ?? original[0].text
-        try JSONSerialization.data(withJSONObject: [
-            "title": "Persiapan Rilis Jumat", "mom": "# Persiapan Rilis Jumat",
-            "corrections": [["from": word, "to": "Mailcow"]]
-        ]).write(to: response)
+        let refine = temp.appendingPathComponent("refine.json")
+        try JSONSerialization.data(withJSONObject: ["corrections": [["from": word, "to": "Mailcow"]]]).write(to: refine)
+        try JSONSerialization.data(withJSONObject: ["title": "Persiapan Rilis Jumat", "mom": "# Persiapan Rilis Jumat"]).write(to: response)
         _ = try explicitMom(meeting, root: root, config: config)
+        let refinePrompt = try String(contentsOf: temp.appendingPathComponent("refine-prompt.txt"), encoding: .utf8)
+        try require(refinePrompt.contains("Mailcow: mail server tim.") && refinePrompt.contains(word),
+                    "The knowledge base and raw transcript must reach the refinement prompt")
         let prompt = try String(contentsOf: temp.appendingPathComponent("prompt.txt"), encoding: .utf8)
-        try require(prompt.contains("Mailcow: mail server tim."), "The knowledge base must reach the notes prompt")
+        try require(prompt.contains("Mailcow: mail server tim.") && prompt.contains("Mailcow menyiapkan") && !prompt.contains("\(word) menyiapkan"),
+                    "Notes must be created from the refined transcript")
         try require(try readTranscript(from: meeting).0 != original && readTranscript(from: meeting).1.contains("Mailcow"),
                     "Supported corrections must update the transcript")
         let raw = try Data(contentsOf: meeting.appendingPathComponent("transcript.raw.json"))
@@ -91,16 +94,16 @@ struct EngineRegressionTests {
                     "The uncorrected transcript must be kept")
 
         try Data([0x41, 0x00, 0x42]).write(to: knowledge)
-        try JSONSerialization.data(withJSONObject: [
-            "title": "Persiapan Rilis Jumat", "mom": "# Persiapan Rilis Jumat",
-            "corrections": [["from": "Mailcow", "to": "Should Not Apply"]]
-        ]).write(to: response)
+        try JSONSerialization.data(withJSONObject: ["corrections": [["from": "Mailcow", "to": "Should Not Apply"]]]).write(to: refine)
+        try FileManager.default.removeItem(at: temp.appendingPathComponent("refine-prompt.txt"))
         _ = try explicitMom(meeting, root: root, config: config)
         try require(!(try readTranscript(from: meeting).1.contains("Should Not Apply")),
                     "An unreadable knowledge base is skipped and corrections are ignored without it")
+        try require(!FileManager.default.fileExists(atPath: temp.appendingPathComponent("refine-prompt.txt").path),
+                    "Refinement must not run without a knowledge base")
         try KnowledgeBase.setPath(nil, root: root)
         try require(try KnowledgeBase.path(root: root) == nil, "Removing the knowledge base clears the setting")
-        print("PASS: Knowledge base reaches notes and applies whole-word transcript corrections with the original kept")
+        print("PASS: Knowledge base refines the transcript before notes and keeps the original")
     }
 
     static func main() throws {
@@ -206,10 +209,17 @@ struct EngineRegressionTests {
           echo 'Logged in using ChatGPT'
           exit 0
         fi
+        schema=''
         while [[ $# -gt 0 ]]; do
+          if [[ "$1" == "--output-schema" ]]; then schema="$2"; fi
           if [[ "$1" == "--output-last-message" ]]; then
-            cat > '\(temp.appendingPathComponent("prompt.txt").path)'
-            cp '\(response.path)' "$2"
+            if grep -q '"mom"' "$schema"; then
+              cat > '\(temp.appendingPathComponent("prompt.txt").path)'
+              cp '\(response.path)' "$2"
+            else
+              cat > '\(temp.appendingPathComponent("refine-prompt.txt").path)'
+              cp '\(temp.appendingPathComponent("refine.json").path)' "$2"
+            fi
             exit 0
           fi
           shift
