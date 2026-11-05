@@ -241,7 +241,10 @@ actor LiveTranscription {
             var options = DecodingOptions(
                 verbose: false, task: .transcribe, usePrefillPrompt: true,
                 detectLanguage: true, skipSpecialTokens: true,
-                windowClipTime: min(1, Float(endFrame - cursor) / Float(Self.sampleRate) / 2)
+                windowClipTime: min(1, Float(endFrame - cursor) / Float(Self.sampleRate) / 2),
+                // Windows start mid-sentence, so a low first-token log probability is expected.
+                // Rejecting it forces sampled fallbacks that often return no text for real speech.
+                firstTokenLogProbThreshold: nil
             )
             options.clipTimestamps = [Float(Double(cursor - contextStart) / Double(Self.sampleRate))]
             let results: [TranscriptionResult]
