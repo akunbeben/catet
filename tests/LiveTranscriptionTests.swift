@@ -188,6 +188,9 @@ struct LiveTranscriptionTests {
         sparseSpeech.replaceSubrange(16_000..<17_600, with: repeatElement(Float(0.02), count: 1_600))
         try check(!LiveAudioMixer.isSilent(sparseSpeech[...]),
                   "A brief utterance between long pauses must remain available for transcription")
+        let quietSpeech = (0..<1_600).map { Float(0.0016 * sin(Double($0) * 0.3) * 2.squareRoot()) }
+        try check(LiveAudioMixer.isDigitalSilence(quietSamples[...]) && !LiveAudioMixer.isDigitalSilence(quietSpeech[...]),
+                  "Segments over digital silence are dropped while the quietest recorded speech is kept")
         var silence = LiveSegmentConfirmation()
         _ = silence.replacePending(with: [], confirmingPrefix: 0)
         do {
@@ -248,6 +251,31 @@ struct LiveTranscriptionTests {
         print("PASS: Live recovery backs off, bounds retries per audio cursor, and stops on fatal errors")
     }
 
+    static func testLanguageVotes() throws {
+        var votes = LiveLanguageVotes()
+        votes.record("en"); votes.record("id")
+        try check(votes.meetingLanguage == nil, "Language stays auto-detected until enough windows agree")
+        votes.record("id")
+        try check(votes.meetingLanguage == "id", "The majority language locks after three confirmed windows")
+        votes.record("es"); votes.record("es"); votes.record("es")
+        try check(votes.meetingLanguage == "id", "Later drifting windows cannot change the locked meeting language")
+        print("PASS: Live language locks to the meeting majority")
+    }
+
+    static func testTruncatedSegmentDetection() throws {
+        let speech = (0..<160_000).map { Float(0.02 * sin(Double($0) * 0.3)) }
+        var pause = speech
+        pause.replaceSubrange(16_000..<160_000, with: repeatElement(Float(0), count: 144_000))
+        try check(LiveAudioMixer.speechSeconds(speech[...]) == 10 && LiveAudioMixer.speechSeconds(pause[...]) == 1,
+                  "Speech time counts only audible 100 ms frames")
+        let segment = LiveTranscriptSegment(start: 0, end: 10, text: "Oke terima kasih")
+        try check(segment.looksTruncated(speechSeconds: 10), "A few words over ten seconds of speech mark a collapsed window")
+        try check(!segment.looksTruncated(speechSeconds: 1), "A short phrase followed by a pause is kept")
+        try check(!LiveTranscriptSegment(start: 0, end: 7, text: "Oke").looksTruncated(speechSeconds: 7),
+                  "Short segments are confirmed without another decode")
+        print("PASS: Live transcription detects segments that skipped speech")
+    }
+
     static func main() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("catet-live-transcription-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -257,6 +285,8 @@ struct LiveTranscriptionTests {
         try testSegmentConfirmationAndSilence()
         try testAbsoluteSegmentMapping()
         try testRecoveryBudget()
+        try testLanguageVotes()
+        try testTruncatedSegmentDetection()
         print("All live-transcription regressions passed.")
     }
 }

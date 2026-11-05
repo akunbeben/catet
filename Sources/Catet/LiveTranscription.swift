@@ -18,6 +18,7 @@ actor LiveTranscription {
     private static let minimumNewAudioFrames = sampleRate * 20
     private static let windowFrames = sampleRate * 29
     private static let contextFrames = sampleRate * 2
+    private static let shorterWindowSeconds = [14, 7]
     private static let modelName = "openai_whisper-large-v3-v20240930_turbo"
 
     private let directory: URL
@@ -34,6 +35,7 @@ actor LiveTranscription {
     private var segmentConfirmation = LiveSegmentConfirmation()
     private var terminalError: LiveTranscriptionError?
     private var recovery = LiveTranscriptionRecovery()
+    private var languageVotes = LiveLanguageVotes()
 
     init(directory: URL) {
         self.directory = directory
@@ -238,31 +240,49 @@ actor LiveTranscription {
 
             status = .transcribing
             guard let model else { throw LiveTranscriptionError.model("The WhisperKit model is not loaded.") }
-            var options = DecodingOptions(
-                verbose: false, task: .transcribe, usePrefillPrompt: true,
-                detectLanguage: true, skipSpecialTokens: true,
-                windowClipTime: min(1, Float(endFrame - cursor) / Float(Self.sampleRate) / 2),
-                // Windows start mid-sentence, so a low first-token log probability is expected.
-                // Rejecting it forces sampled fallbacks that often return no text for real speech.
-                firstTokenLogProbThreshold: nil
-            )
-            options.clipTimestamps = [Float(Double(cursor - contextStart) / Double(Self.sampleRate))]
-            let results: [TranscriptionResult]
-            do {
-                results = try await model.transcribe(audioArray: audio, decodeOptions: options)
-            } catch {
-                if error is CancellationError { throw error }
-                throw LiveTranscriptionError.inference(error.localizedDescription)
+            func samples(of segment: LiveTranscriptSegment) -> ArraySlice<Float> {
+                let start = min(audio.count, max(0, Int(segment.start * Double(Self.sampleRate)) - Int(contextStart)))
+                let end = min(audio.count, max(start, Int(segment.end * Double(Self.sampleRate)) - Int(contextStart)))
+                return audio[start..<end]
             }
+            func looksTruncated(_ segment: LiveTranscriptSegment) -> Bool {
+                segment.looksTruncated(speechSeconds: LiveAudioMixer.speechSeconds(samples(of: segment)))
+            }
+            func decode(until decodeEnd: Int64) async throws -> (segments: [LiveTranscriptSegment], language: String?) {
+                var options = DecodingOptions(
+                    verbose: false, task: .transcribe, usePrefillPrompt: true,
+                    detectLanguage: true, skipSpecialTokens: true,
+                    windowClipTime: min(1, Float(decodeEnd - cursor) / Float(Self.sampleRate) / 2),
+                    // Windows start mid-sentence, so a low first-token log probability is expected.
+                    // Rejecting it forces sampled fallbacks that often return no text for real speech.
+                    firstTokenLogProbThreshold: nil
+                )
+                options.clipTimestamps = [Float(Double(cursor - contextStart) / Double(Self.sampleRate))]
+                // Per-window detection drifts on short or quiet audio, e.g. closing remarks become Spanish or Japanese.
+                if let language = languageVotes.meetingLanguage {
+                    options.language = language
+                    options.detectLanguage = false
+                }
+                let results: [TranscriptionResult]
+                do {
+                    results = try await model.transcribe(audioArray: Array(audio[..<Int(decodeEnd - contextStart)]), decodeOptions: options)
+                } catch {
+                    if error is CancellationError { throw error }
+                    throw LiveTranscriptionError.inference(error.localizedDescription)
+                }
+                let relativeSegments = results.flatMap(\.segments).map {
+                    LiveTranscriptSegment(start: Double($0.start), end: Double($0.end), text: $0.text)
+                }
+                let segments = try LiveAudioWindow.absoluteSegments(relativeSegments,
+                                                                    contextStartFrame: contextStart,
+                                                                    cursorFrame: cursor,
+                                                                    recordingEndFrame: decodeEnd)
+                // Whisper invents phrases such as "Thank you." over digital silence.
+                return (segments.filter { !LiveAudioMixer.isDigitalSilence(samples(of: $0)) }, results.first?.language)
+            }
+            let decoded = try await decode(until: endFrame)
+            var segments = decoded.segments
             if cancelled || (finishing && !final) { return }
-
-            let relativeSegments = results.flatMap(\.segments).map {
-                LiveTranscriptSegment(start: Double($0.start), end: Double($0.end), text: $0.text)
-            }
-            let segments = try LiveAudioWindow.absoluteSegments(relativeSegments,
-                                                                contextStartFrame: contextStart,
-                                                                cursorFrame: cursor,
-                                                                recordingEndFrame: endFrame)
 
             lastInferenceEndFrame = endFrame
             if final && reachesRecordingEnd {
@@ -277,10 +297,25 @@ actor LiveTranscription {
                 return
             }
 
-            let confirmCount = segments.count > 2
+            var confirmCount = segments.count > 2
                 ? segments.count - 2
                 : (windowIsFull && !segments.isEmpty ? 1 : 0)
+            if let truncated = segments.prefix(confirmCount).firstIndex(where: looksTruncated) {
+                if truncated > 0 {
+                    confirmCount = truncated
+                } else {
+                    // Shorter windows usually restore the timestamps and the skipped speech.
+                    for seconds in Self.shorterWindowSeconds where looksTruncated(segments[0]) {
+                        let retry = try await decode(until: min(endFrame, cursor + Int64(seconds * Self.sampleRate))).segments
+                        if cancelled || (finishing && !final) { return }
+                        guard !retry.isEmpty else { break }
+                        segments = retry
+                        confirmCount = segments.count > 2 ? segments.count - 2 : 1
+                    }
+                }
+            }
             let newlyConfirmed = segmentConfirmation.replacePending(with: segments, confirmingPrefix: confirmCount)
+            if newlyConfirmed != nil, let language = decoded.language { languageVotes.record(language) }
             if let newlyConfirmed {
                 nextWindowStartFrame = max(cursor, Int64(ceil(newlyConfirmed.end * Double(Self.sampleRate))))
             } else if segments.isEmpty {

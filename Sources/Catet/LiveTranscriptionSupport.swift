@@ -4,6 +4,11 @@ struct LiveTranscriptSegment: Codable, Equatable, Sendable {
     let start: Double
     let end: Double
     let text: String
+
+    /// Whisper sometimes drops timestamps and stretches a few words over many seconds of speech.
+    func looksTruncated(speechSeconds: Double) -> Bool {
+        end - start >= 8 && Double(text.split(whereSeparator: \.isWhitespace).count) < speechSeconds
+    }
 }
 
 enum LiveAudioWindow {
@@ -90,6 +95,20 @@ struct LiveTranscriptionRecovery {
     }
 }
 
+/// Locks decoding to the meeting's majority language once enough windows agree.
+struct LiveLanguageVotes {
+    private var counts: [String: Int] = [:]
+    private(set) var meetingLanguage: String?
+
+    mutating func record(_ language: String) {
+        guard meetingLanguage == nil, !language.isEmpty else { return }
+        counts[language, default: 0] += 1
+        guard counts.values.reduce(0, +) >= 3,
+              let leader = counts.max(by: { $0.value < $1.value }), leader.value >= 2 else { return }
+        meetingLanguage = leader.key
+    }
+}
+
 struct LiveSegmentConfirmation {
     private(set) var confirmed: [LiveTranscriptSegment] = []
     private(set) var pending: [LiveTranscriptSegment] = []
@@ -135,6 +154,25 @@ final class LiveAudioMixer {
             }
         }
         return frameCount == 0 || sqrt(energy / Double(frameCount)) < 0.005
+    }
+
+    static func speechSeconds(_ samples: ArraySlice<Float>) -> Double {
+        let frameLength = outputSampleRate / 10
+        var frames = 0
+        var index = samples.startIndex
+        while index + frameLength <= samples.endIndex {
+            let energy = samples[index..<(index + frameLength)].reduce(0.0) { $0 + Double($1) * Double($1) }
+            if sqrt(energy / Double(frameLength)) >= 0.005 { frames += 1 }
+            index += frameLength
+        }
+        return Double(frames) / 10
+    }
+
+    /// Quiet speech in recorded meetings stays above this level. Only muted or idle capture falls below it.
+    static func isDigitalSilence(_ samples: ArraySlice<Float>) -> Bool {
+        guard !samples.isEmpty else { return true }
+        let energy = samples.reduce(0.0) { $0 + Double($1) * Double($1) }
+        return sqrt(energy / Double(samples.count)) < 0.0005
     }
 
     private let microphoneURL: URL
