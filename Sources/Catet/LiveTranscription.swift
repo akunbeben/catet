@@ -19,7 +19,6 @@ actor LiveTranscription {
     private static let windowFrames = sampleRate * 29
     private static let contextFrames = sampleRate * 2
     private static let shorterWindowSeconds = [14, 7]
-    private static let modelName = "openai_whisper-large-v3-v20240930_turbo"
 
     private let directory: URL
     private let mixer: LiveAudioMixer
@@ -162,41 +161,10 @@ actor LiveTranscription {
         guard !cancelled else { throw CancellationError() }
         guard model == nil else { return }
         status = .preparingModel
-        guard let applicationSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
-            throw LiveTranscriptionError.model("The Application Support folder is unavailable.")
-        }
-        let modelCache = applicationSupport.appendingPathComponent("Catet/models", isDirectory: true)
-        do {
-            try FileManager.default.createDirectory(at: modelCache, withIntermediateDirectories: true)
-        } catch {
-            throw LiveTranscriptionError.model("Could not create the model cache: \(error.localizedDescription)")
-        }
+        let loaded = try await WhisperModel.load()
         try Task.checkCancellation()
         guard !cancelled else { throw CancellationError() }
-
-        do {
-            let downloader = ModelDownloader(repoName: "argmaxinc/whisperkit-coreml")
-            let components = [
-                "AudioEncoder.mlmodelc/**", "TextDecoder.mlmodelc/**",
-                "MelSpectrogram.mlmodelc/**", "TextDecoderContextPrefill.mlmodelc/**", "*.json"
-            ]
-            let repository = try await downloader.resolveRepo(
-                patterns: components.map { "\(Self.modelName)/\($0)" },
-                downloadBase: modelCache
-            )
-            try Task.checkCancellation()
-            model = try await WhisperKit(
-                modelFolder: repository.appendingPathComponent(Self.modelName).path,
-                tokenizerFolder: modelCache,
-                verbose: false,
-                prewarm: false,
-                load: true,
-                download: false
-            )
-        } catch {
-            if error is CancellationError { throw error }
-            throw LiveTranscriptionError.model(error.localizedDescription)
-        }
+        model = loaded
     }
 
     private func processWindows(final: Bool) async throws {

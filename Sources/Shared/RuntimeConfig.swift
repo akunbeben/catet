@@ -8,9 +8,8 @@ struct RuntimeConfigurationError: LocalizedError, CustomStringConvertible {
 
 struct RuntimeConfig {
     let ffmpeg: URL
-    let whisper: URL
-    let model: URL
-    let vad: URL
+    /// The app binary transcribes prepared audio with the same WhisperKit model as live transcription.
+    let transcriber: URL
     let codex: URL
 
     static func load() throws -> RuntimeConfig {
@@ -38,6 +37,6 @@ struct RuntimeConfig {
             guard value.hasPrefix("/") else { throw RuntimeConfigurationError("runtime.json \(key) path must be absolute: \(value)") }
             return URL(fileURLWithPath: value)
         }
-        return try RuntimeConfig(ffmpeg: path("ffmpeg"), whisper: path("whisper"), model: path("model"), vad: path("vad"), codex: path("codex"))
+        return try RuntimeConfig(ffmpeg: path("ffmpeg"), transcriber: executableDirectory.appendingPathComponent("Catet"), codex: path("codex"))
     }
 }

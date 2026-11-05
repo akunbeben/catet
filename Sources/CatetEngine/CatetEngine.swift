@@ -236,59 +236,6 @@ private func isJSONBoolean(_ number: NSNumber) -> Bool {
     String(cString: number.objCType) == "c"
 }
 
-func parseTimestamp(_ value: Any?) throws -> Double {
-    guard let value else { throw EngineError("missing timestamp") }
-    if let number = value as? NSNumber {
-        if isJSONBoolean(number) { throw EngineError("invalid timestamp") }
-        return number.doubleValue / 1000.0
-    }
-    if let text = value as? String {
-        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: ",", with: ".")
-        let parts = normalized.split(separator: ":", omittingEmptySubsequences: false)
-        let values = parts.compactMap { Double($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
-        guard values.count == parts.count else { throw EngineError("invalid timestamp") }
-        switch values.count {
-        case 1: return values[0]
-        case 2: return values[0] * 60 + values[1]
-        case 3: return values[0] * 3600 + values[1] * 60 + values[2]
-        default: throw EngineError("invalid timestamp")
-        }
-    }
-    throw EngineError("missing timestamp")
-}
-
-func normalizeWhisper(_ raw: [String: Any]) throws -> [MeetingSegment] {
-    guard let transcription = raw["transcription"] as? [Any] else {
-        throw EngineError("Whisper JSON has no transcription segment list.")
-    }
-    var segments: [MeetingSegment] = []
-    for item in transcription {
-        guard let row = item as? [String: Any], let text = row["text"] as? String else { continue }
-        let cleanText = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cleanText.isEmpty else { continue }
-        let offsets = row["offsets"] as? [String: Any] ?? [:]
-        let timestamps = row["timestamps"] as? [String: Any] ?? [:]
-        let startValue = offsets.keys.contains("from") ? offsets["from"] : timestamps["from"]
-        let endValue = offsets.keys.contains("to") ? offsets["to"] : timestamps["to"]
-        let start: Double
-        let end: Double
-        do {
-            start = try parseTimestamp(startValue)
-            end = try parseTimestamp(endValue)
-        } catch {
-            throw EngineError("Whisper returned a speech segment without valid timestamps: \(String(describing: row))")
-        }
-        guard start.isFinite, end.isFinite, start >= 0, end >= start else {
-            throw EngineError("Whisper returned an invalid time range: \(start)–\(end).")
-        }
-        segments.append(MeetingSegment(start: (start * 1000).rounded(.toNearestOrEven) / 1000, end: (end * 1000).rounded(.toNearestOrEven) / 1000, text: cleanText))
-    }
-    guard !segments.isEmpty else {
-        throw EngineError("No speech was detected. Check the audio source and try another recording.")
-    }
-    return segments
-}
-
 func formatTime(_ seconds: Double) -> String {
     guard seconds.isFinite, seconds >= 0 else { return "00:00:00.000" }
     let whole = floor(seconds)
@@ -326,22 +273,8 @@ func writeTranscript(_ segments: [MeetingSegment], to directory: URL) throws {
 func readTranscript(from directory: URL) throws -> ([MeetingSegment], String) {
     let path = directory.appendingPathComponent("transcript.json")
     do {
-        let object = try JSONSerialization.jsonObject(with: Data(contentsOf: path))
-        guard let raw = object as? [String: Any], let values = raw["segments"] as? [Any], !values.isEmpty else {
-            throw EngineError("empty segments")
-        }
-        var segments: [MeetingSegment] = []
-        for value in values {
-            guard let row = value as? [String: Any], let text = row["text"] as? String else {
-                throw EngineError("invalid segment")
-            }
-            let cleanText = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !cleanText.isEmpty else { throw EngineError("invalid segment") }
-            let start = try parseTranscriptNumber(row["start"])
-            let end = try parseTranscriptNumber(row["end"])
-            guard start.isFinite, end.isFinite, start >= 0, end >= start else { throw EngineError("invalid range") }
-            segments.append(MeetingSegment(start: start, end: end, text: cleanText))
-        }
+        let segments = try decodeSegments(Data(contentsOf: path))
+        guard !segments.isEmpty else { throw EngineError("empty segments") }
         let text = transcriptText(segments)
         let textURL = directory.appendingPathComponent("transcript.txt")
         let existing = try? String(contentsOf: textURL, encoding: .utf8)
@@ -349,6 +282,23 @@ func readTranscript(from directory: URL) throws -> ([MeetingSegment], String) {
         return (segments, text)
     } catch {
         throw EngineError("A valid transcript.json is required before meeting notes can be created: \(error)")
+    }
+}
+
+/// Reads `{"segments": [{"start", "end", "text"}]}` with times in seconds.
+func decodeSegments(_ data: Data) throws -> [MeetingSegment] {
+    guard let raw = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let values = raw["segments"] as? [Any] else { throw EngineError("missing segments") }
+    return try values.map { value in
+        guard let row = value as? [String: Any], let text = row["text"] as? String else {
+            throw EngineError("invalid segment")
+        }
+        let cleanText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanText.isEmpty else { throw EngineError("invalid segment") }
+        let start = try parseTranscriptNumber(row["start"])
+        let end = try parseTranscriptNumber(row["end"])
+        guard start.isFinite, end.isFinite, start >= 0, end >= start else { throw EngineError("invalid range") }
+        return MeetingSegment(start: start, end: end, text: cleanText)
     }
 }
 
@@ -757,22 +707,18 @@ private func transcribe(_ directory: URL, config: RuntimeConfig) throws {
     defer { try? FileManager.default.removeItem(at: directory.appendingPathComponent("audio.wav")) }
     try? FileManager.default.removeItem(at: directory.appendingPathComponent("transcript.raw.json"))
     let audio = try prepareAudio(in: directory, config: config)
-    let prefix = directory.appendingPathComponent("whisper")
-    let rawPath = directory.appendingPathComponent("whisper.json")
-    try? FileManager.default.removeItem(at: rawPath)
-    let arguments = ["-m", config.model.path, "-f", audio.path, "-l", "auto", "--vad", "-vm", config.vad.path, "-oj", "-of", prefix.path]
-    try checkCommand(runCommand(config.whisper, arguments: arguments), label: "whisper.cpp transcription")
-    guard FileManager.default.fileExists(atPath: rawPath.path) else {
-        throw EngineError("whisper.cpp did not produce expected JSON output: \(rawPath.path)")
+    let output = directory.appendingPathComponent("transcription.json")
+    try? FileManager.default.removeItem(at: output)
+    defer { try? FileManager.default.removeItem(at: output) }
+    try checkCommand(runCommand(config.transcriber, arguments: ["--transcribe-audio", audio.path, output.path]),
+                     label: "WhisperKit transcription")
+    let segments: [MeetingSegment]
+    do { segments = try decodeSegments(Data(contentsOf: output)) }
+    catch { throw EngineError("Cannot read WhisperKit transcription output: \(error)") }
+    guard !segments.isEmpty else {
+        throw EngineError("No speech was detected. Check the audio source and try another recording.")
     }
-    let raw: [String: Any]
-    do {
-        guard let object = try JSONSerialization.jsonObject(with: Data(contentsOf: rawPath)) as? [String: Any] else {
-            throw EngineError("Whisper JSON root must be an object.")
-        }
-        raw = object
-    } catch { throw EngineError("Cannot parse whisper.cpp JSON output: \(error)") }
-    try writeTranscript(normalizeWhisper(raw), to: directory)
+    try writeTranscript(segments, to: directory)
 }
 
 private func humanAccountFailure(_ error: CodexAccountsError) -> EngineFailure {

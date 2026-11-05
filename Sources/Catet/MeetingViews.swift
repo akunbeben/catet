@@ -39,6 +39,9 @@ struct FloatingPill: View {
     private var mode: Mode { controller.pillMode }
     private var expanded: Bool { controller.pillExpanded }
     private var showsKeyboardHints: Bool { expanded && controller.quickRecordingKeyboardActive }
+    // Idle, the full card slides out from the screen edge like a drawer; collapsed, only its edge shows.
+    private var cardWidth: CGFloat { Self.surfaceWidth(mode, expanded: mode == .idle || expanded) }
+    private var cardOffset: CGFloat { mode == .idle && !expanded ? Self.surfaceWidth(.idle, expanded: false) - cardWidth : 0 }
     private var animation: Animation? { reduceMotion ? nil : .smooth(duration: Self.animationDuration) }
     private var finishingMessage: String {
         controller.liveTranscriptionStatusMessage.isEmpty ? "Finishing transcript" : controller.liveTranscriptionStatusMessage
@@ -57,7 +60,7 @@ struct FloatingPill: View {
                     .transition(.opacity)
             }
         }
-        .frame(width: Self.surfaceWidth(mode, expanded: expanded), alignment: .topLeading)
+        .frame(width: cardWidth, alignment: .topLeading)
         .clipShape(RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous))
         .background {
             RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous)
@@ -65,6 +68,7 @@ struct FloatingPill: View {
                 .overlay(RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous).strokeBorder(.white.opacity(0.1), lineWidth: 0.5))
                 .shadow(color: .black.opacity(0.3), radius: 8, y: 3)
         }
+        .offset(x: cardOffset)
         .padding(EdgeInsets(top: Self.hoverPadding, leading: 0, bottom: Self.hoverPadding, trailing: Self.hoverPadding))
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .contentShape(Rectangle())
@@ -89,14 +93,7 @@ struct FloatingPill: View {
     }
 
     private var idleRow: some View {
-        ZStack(alignment: .leading) {
-            Capsule().fill(.white.opacity(0.4))
-                .frame(width: 2, height: 18)
-                .padding(.leading, 3)
-                .opacity(expanded ? 0 : 1)
-                .accessibilityHidden(expanded)
-                .accessibilityLabel("Catet")
-                .help("Catet")
+        ZStack(alignment: .trailing) {
             HStack(spacing: 10) {
                 Button { controller.beginRecordingFlow() } label: {
                     HStack(spacing: 6) {
@@ -117,10 +114,16 @@ struct FloatingPill: View {
                 libraryButton
             }
             .padding(.leading, 8)
-            .padding(.trailing, 8)
-            .opacity(expanded ? 1 : 0)
+            .padding(.trailing, 12)
             .allowsHitTesting(expanded)
             .accessibilityHidden(!expanded)
+            Capsule().fill(.white.opacity(0.4))
+                .frame(width: 2, height: 18)
+                .padding(.trailing, 3)
+                .opacity(expanded ? 0 : 1)
+                .accessibilityHidden(expanded)
+                .accessibilityLabel("Catet")
+                .help("Catet")
         }
     }
 

@@ -9,6 +9,21 @@ import QuartzCore
 @main
 struct CatetApp {
     @MainActor static func main() {
+        let arguments = CommandLine.arguments
+        // CatetEngine runs this binary headless to transcribe saved audio with WhisperKit.
+        if arguments.count == 4, arguments[1] == "--transcribe-audio" {
+            Task.detached {
+                do {
+                    try await WhisperModel.transcribeFile(audio: URL(fileURLWithPath: arguments[2]),
+                                                          output: URL(fileURLWithPath: arguments[3]))
+                    exit(0)
+                } catch {
+                    fputs("catet: \(error.localizedDescription)\n", stderr)
+                    exit(1)
+                }
+            }
+            dispatchMain()
+        }
         let application = NSApplication.shared
         let delegate = AppDelegate()
         application.delegate = delegate
