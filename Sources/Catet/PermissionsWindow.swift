@@ -1,6 +1,7 @@
 import AppKit
 import AVFoundation
 import CoreGraphics
+import UniformTypeIdentifiers
 
 private final class SettingsBackgroundView: NSView {
     override var isOpaque: Bool { true }
@@ -19,10 +20,15 @@ final class PermissionsWindow: NSObject, NSWindowDelegate {
     private let systemAudioButton = NSButton(title: "Allow Access…", target: nil, action: nil)
     private let captureSystemAudio = NSButton(checkboxWithTitle: "Include system audio", target: nil, action: nil)
     private let createMoM = NSButton(checkboxWithTitle: "Create meeting notes automatically", target: nil, action: nil)
+    private let knowledgeBaseStatus = NSTextField(wrappingLabelWithString: "")
+    private let knowledgeBaseButton = NSButton(title: "Choose…", target: nil, action: nil)
+    private let removeKnowledgeBaseButton = NSButton(title: "Remove", target: nil, action: nil)
+    private let root: URL
     var onOpenCodexAccounts: (() -> Void)?
 
-    override init() {
-        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 530), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+    init(root: URL) {
+        self.root = root
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 640), styleMask: [.titled, .closable], backing: .buffered, defer: false)
         super.init()
         window.title = "Catet Settings"
         window.isReleasedWhenClosed = false
@@ -38,6 +44,11 @@ final class PermissionsWindow: NSObject, NSWindowDelegate {
             preference(captureSystemAudio, detail: "Record other apps alongside your microphone."),
             preference(createMoM, detail: "Sends the finished transcript to Codex.")
         ])
+        knowledgeBaseButton.target = self
+        knowledgeBaseButton.action = #selector(chooseKnowledgeBase)
+        removeKnowledgeBaseButton.target = self
+        removeKnowledgeBaseButton.action = #selector(removeKnowledgeBase)
+        let knowledgeBase = section("Knowledge base", rows: [knowledgeBaseRow()])
 
         microphoneButton.target = self
         microphoneButton.action = #selector(requestMicrophone)
@@ -56,7 +67,7 @@ final class PermissionsWindow: NSObject, NSWindowDelegate {
         footer.orientation = .horizontal
         footer.distribution = .fill
         footer.alignment = .centerY
-        let stack = NSStackView(views: [title, recording, accounts, permissions, footer])
+        let stack = NSStackView(views: [title, recording, knowledgeBase, accounts, permissions, footer])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 18
@@ -69,6 +80,7 @@ final class PermissionsWindow: NSObject, NSWindowDelegate {
             stack.topAnchor.constraint(equalTo: content.topAnchor, constant: 24),
             stack.bottomAnchor.constraint(lessThanOrEqualTo: content.bottomAnchor, constant: -24),
             recording.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            knowledgeBase.widthAnchor.constraint(equalTo: stack.widthAnchor),
             permissions.widthAnchor.constraint(equalTo: stack.widthAnchor),
             footer.widthAnchor.constraint(equalTo: stack.widthAnchor)
         ])
@@ -122,6 +134,32 @@ final class PermissionsWindow: NSObject, NSWindowDelegate {
         row.orientation = .horizontal
         row.alignment = .centerY
         row.spacing = 12
+        row.distribution = .fill
+        return row
+    }
+
+    private func knowledgeBaseRow() -> NSView {
+        let heading = NSTextField(labelWithString: "Text file")
+        heading.font = .systemFont(ofSize: 13, weight: .medium)
+        knowledgeBaseStatus.font = .systemFont(ofSize: 11)
+        knowledgeBaseStatus.maximumNumberOfLines = 0
+        let text = NSStackView(views: [heading, knowledgeBaseStatus])
+        text.orientation = .vertical
+        text.alignment = .leading
+        text.spacing = 4
+        knowledgeBaseStatus.widthAnchor.constraint(equalTo: text.widthAnchor).isActive = true
+        text.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        knowledgeBaseStatus.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        for button in [knowledgeBaseButton, removeKnowledgeBaseButton] {
+            button.bezelStyle = .rounded
+            button.controlSize = .small
+            button.setContentHuggingPriority(.required, for: .horizontal)
+            button.setContentCompressionResistancePriority(.required, for: .horizontal)
+        }
+        let row = NSStackView(views: [text, removeKnowledgeBaseButton, knowledgeBaseButton])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 8
         row.distribution = .fill
         return row
     }
@@ -182,6 +220,7 @@ final class PermissionsWindow: NSObject, NSWindowDelegate {
         let preferences = RecordingPreferences.load() ?? RecordingPreferences()
         captureSystemAudio.state = preferences.captureSystemAudio ? .on : .off
         createMoM.state = preferences.createMoM ? .on : .off
+        refreshKnowledgeBase()
         let microphone = AVCaptureDevice.authorizationStatus(for: .audio)
         switch microphone {
         case .authorized: microphoneStatus.stringValue = "Allowed"
@@ -203,6 +242,62 @@ final class PermissionsWindow: NSObject, NSWindowDelegate {
 
     @objc private func saveRecordingPreferences() {
         RecordingPreferences(captureSystemAudio: captureSystemAudio.state == .on, createMoM: createMoM.state == .on).save()
+    }
+
+    private func refreshKnowledgeBase() {
+        let detail = "Names and terms that fix transcript spelling and meeting notes. Sent to Codex with each transcript."
+        do {
+            guard let path = try KnowledgeBase.path(root: root) else {
+                knowledgeBaseStatus.stringValue = detail
+                knowledgeBaseStatus.textColor = .secondaryLabelColor
+                removeKnowledgeBaseButton.isHidden = true
+                return
+            }
+            removeKnowledgeBaseButton.isHidden = false
+            do {
+                _ = try KnowledgeBase.read(path)
+                knowledgeBaseStatus.stringValue = path.path
+                knowledgeBaseStatus.textColor = .secondaryLabelColor
+            } catch {
+                knowledgeBaseStatus.stringValue = "\(error.localizedDescription) Notes are created without it."
+                knowledgeBaseStatus.textColor = .systemOrange
+            }
+        } catch {
+            knowledgeBaseStatus.stringValue = error.localizedDescription
+            knowledgeBaseStatus.textColor = .systemOrange
+            removeKnowledgeBaseButton.isHidden = false
+        }
+    }
+
+    @objc private func chooseKnowledgeBase() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.plainText]
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard let self, response == .OK, let url = panel.url else { return }
+            do {
+                _ = try KnowledgeBase.read(url)
+                try KnowledgeBase.setPath(url, root: self.root)
+            } catch {
+                let alert = NSAlert()
+                alert.messageText = "Catet could not use this file"
+                alert.informativeText = error.localizedDescription
+                alert.beginSheetModal(for: self.window)
+            }
+            self.refreshKnowledgeBase()
+        }
+    }
+
+    @objc private func removeKnowledgeBase() {
+        do { try KnowledgeBase.setPath(nil, root: root) }
+        catch {
+            let alert = NSAlert()
+            alert.messageText = "Catet could not remove the knowledge base"
+            alert.informativeText = error.localizedDescription
+            alert.beginSheetModal(for: window)
+        }
+        refreshKnowledgeBase()
     }
 
     @objc private func openCodexAccounts() { onOpenCodexAccounts?() }

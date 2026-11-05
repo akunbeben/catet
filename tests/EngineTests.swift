@@ -63,6 +63,46 @@ struct EngineRegressionTests {
         return String(cString: value)
     }
 
+    static func testKnowledgeBaseCorrections(meeting: URL, root: URL, temp: URL, response: URL, config: RuntimeConfig) throws {
+        let original = try readTranscript(from: meeting).0
+        let corrected = applyTranscriptCorrections([
+            TranscriptCorrection(from: "Melco", to: "Mailcow"),
+            TranscriptCorrection(from: "a", to: "b"),
+            TranscriptCorrection(from: "x\ny", to: "z")
+        ], to: [MeetingSegment(start: 0, end: 1, text: "Antrean Melco dan Melcotech, cek Melco.")])
+        try require(corrected[0].text == "Antrean Mailcow dan Melcotech, cek Mailcow.",
+                    "Corrections replace whole words only and skip multi-line input")
+
+        let knowledge = temp.appendingPathComponent("glossary.txt")
+        try Data("Mailcow: mail server tim.\n".utf8).write(to: knowledge)
+        try KnowledgeBase.setPath(knowledge, root: root)
+        let word = original[0].text.split(separator: " ").first.map(String.init) ?? original[0].text
+        try JSONSerialization.data(withJSONObject: [
+            "title": "Persiapan Rilis Jumat", "mom": "# Persiapan Rilis Jumat",
+            "corrections": [["from": word, "to": "Mailcow"]]
+        ]).write(to: response)
+        _ = try explicitMom(meeting, root: root, config: config)
+        let prompt = try String(contentsOf: temp.appendingPathComponent("prompt.txt"), encoding: .utf8)
+        try require(prompt.contains("Mailcow: mail server tim."), "The knowledge base must reach the notes prompt")
+        try require(try readTranscript(from: meeting).0 != original && readTranscript(from: meeting).1.contains("Mailcow"),
+                    "Supported corrections must update the transcript")
+        let raw = try Data(contentsOf: meeting.appendingPathComponent("transcript.raw.json"))
+        try require(raw.isEmpty == false && String(decoding: raw, as: UTF8.self).contains(word),
+                    "The uncorrected transcript must be kept")
+
+        try Data([0x41, 0x00, 0x42]).write(to: knowledge)
+        try JSONSerialization.data(withJSONObject: [
+            "title": "Persiapan Rilis Jumat", "mom": "# Persiapan Rilis Jumat",
+            "corrections": [["from": "Mailcow", "to": "Should Not Apply"]]
+        ]).write(to: response)
+        _ = try explicitMom(meeting, root: root, config: config)
+        try require(!(try readTranscript(from: meeting).1.contains("Should Not Apply")),
+                    "An unreadable knowledge base is skipped and corrections are ignored without it")
+        try KnowledgeBase.setPath(nil, root: root)
+        try require(try KnowledgeBase.path(root: root) == nil, "Removing the knowledge base clears the setting")
+        print("PASS: Knowledge base reaches notes and applies whole-word transcript corrections with the original kept")
+    }
+
     static func main() throws {
         let originalAccountID = environment("CATET_CODEX_ACCOUNT_ID")
         setEnvironment("CATET_CODEX_ACCOUNT_ID", nil)
@@ -171,6 +211,7 @@ struct EngineRegressionTests {
         fi
         while [[ $# -gt 0 ]]; do
           if [[ "$1" == "--output-last-message" ]]; then
+            cat > '\(temp.appendingPathComponent("prompt.txt").path)'
             cp '\(response.path)' "$2"
             exit 0
           fi
@@ -202,6 +243,7 @@ struct EngineRegressionTests {
             try require(try Data(contentsOf: meeting.appendingPathComponent("mom.md")) == savedMinutes, "Invalid regeneration must preserve the previous MoM")
             try require(try readTranscript(from: meeting).0 == speech, "Renaming must never alter the transcript")
         }
+        try testKnowledgeBaseCorrections(meeting: meeting, root: root, temp: temp, response: response, config: generatedConfig)
         let accounts = CodexAccounts(root: root)
         let alpha = try accounts.add(label: "Alpha")
         let beta = try accounts.add(label: "Beta")

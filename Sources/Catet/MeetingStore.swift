@@ -133,7 +133,7 @@ final class MeetingStore {
             await cancelLive()
             // A failed publication may have left only one final output. Never let the
             // engine mistake it for a complete transcript and skip the saved audio.
-            for name in ["transcript.json", "transcript.txt", "live-transcript.json", "live-transcript.txt"] {
+            for name in ["transcript.json", "transcript.txt", "transcript.raw.json", "live-transcript.json", "live-transcript.txt"] {
                 let path = meeting.directory.appendingPathComponent(name)
                 do { try fm.removeItem(at: path) }
                 catch let error as NSError where error.domain == NSCocoaErrorDomain && error.code == NSFileNoSuchFileError { }

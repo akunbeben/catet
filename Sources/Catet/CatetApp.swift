@@ -44,7 +44,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(withTitle: "Quit Catet", action: #selector(quit), keyEquivalent: "q")
         menu.items.forEach { $0.target = self }
         statusItem.menu = menu
-        permissionsWindow = PermissionsWindow()
+        permissionsWindow = PermissionsWindow(root: controller.store.root)
         permissionsWindow.onOpenCodexAccounts = { [weak self] in self?.controller.openCodexAccounts() }
         do {
             quickRecordingShortcut = try QuickRecordingShortcut { [weak self] in self?.controller.toggleQuickRecordingKeyboard() }

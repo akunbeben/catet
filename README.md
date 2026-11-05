@@ -21,13 +21,13 @@ Setup installs `/Applications/Catet.app`. Setup and the first recording need int
 
 - Record from the floating control or menu bar. Get participants’ consent and allow microphone access. Online meetings also need screen/system audio permission. Catet saves audio only.
 - Read the live transcript in the meeting library. Stop to finish the transcript and create notes if enabled.
-- Open **Catet → Settings…** for recording preferences. Press **Control+Option+Space** for quick recording and **?** in the library for shortcuts.
+- Open **Catet → Settings…** for recording preferences. You can also choose a knowledge base: a UTF-8 text file up to 50 KB with the names and terms your team uses. Catet uses it to fix transcript spelling and write more accurate notes, and keeps the original transcript as `transcript.raw.json`. Press **Control+Option+Space** for quick recording and **?** in the library for shortcuts.
 
 Recordings stay in `~/Library/Application Support/Catet/meetings` for review and retries. Use the app to manage them while recording or processing is active. Run `./catet --help` for imports and CLI usage.
 
 ## Privacy
 
-Audio and transcription stay on your Mac. Creating meeting notes sends the transcript to Codex through your ChatGPT account. Configured integration commands can share files with other systems. Review transcripts and notes before sharing.
+Audio and transcription stay on your Mac. Creating meeting notes sends the transcript and the knowledge base file, if you chose one, to Codex through your ChatGPT account. Configured integration commands can share files with other systems. Review transcripts and notes before sharing.
 
 ## Integrations
 

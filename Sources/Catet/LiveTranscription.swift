@@ -393,6 +393,7 @@ actor LiveTranscription {
     private func removeFinalOutputs() throws {
         try removeIfPresent(directory.appendingPathComponent("transcript.json"))
         try removeIfPresent(directory.appendingPathComponent("transcript.txt"))
+        try removeIfPresent(directory.appendingPathComponent("transcript.raw.json"))
     }
 
     private func removeIfPresent(_ url: URL) throws {
