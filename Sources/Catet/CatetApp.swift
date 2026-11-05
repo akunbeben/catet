@@ -313,7 +313,8 @@ final class CatetController: ObservableObject {
     func showLibrary() {
         if let libraryWindow, libraryWindow.isVisible { libraryWindow.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true); refresh(); return }
         let view = LibraryView(controller: self)
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 880, height: 650), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 880, height: 650), styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
+        window.titlebarAppearsTransparent = true; window.titleVisibility = .hidden
         window.contentViewController = NSHostingController(rootView: view)
         window.title = "Catet Meetings"; window.setContentSize(NSSize(width: 880, height: 650)); window.minSize = NSSize(width: 650, height: 460)
         window.isReleasedWhenClosed = false

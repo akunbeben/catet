@@ -326,51 +326,20 @@ struct LibraryView: View {
                     ScrollView {
                         LazyVStack(spacing: 3) {
                             ForEach(filteredMeetings) { meeting in
-                                HStack(alignment: .top, spacing: 8) {
-                                    Toggle("Select \(meeting.title)", isOn: Binding(
-                                        get: { markedMeetingIDs.contains(meeting.id) },
-                                        set: { marked in
-                                            selection = meeting.id
-                                            focusList()
-                                            if marked { markedMeetingIDs.insert(meeting.id) }
-                                            else { markedMeetingIDs.remove(meeting.id) }
-                                        }
-                                    ))
-                                    .toggleStyle(.checkbox)
-                                    .labelsHidden()
-                                    .accessibilityIdentifier("select-meeting-\(meeting.id)")
-                                    Button {
-                                        select(meeting, proxy: proxy)
-                                    } label: {
-                                        VStack(alignment: .leading, spacing: 8) {
-                                            Text(meeting.title).font(.system(size: 13, weight: .semibold)).lineLimit(2).help(meeting.title)
-                                            HStack {
-                                                Text(meetingDate(meeting.created_at)).lineLimit(1)
-                                                Spacer(minLength: 6)
-                                                Text(meeting.statusLabel)
-                                                    .font(.system(size: 10, weight: .medium))
-                                                    .foregroundStyle(statusColor(meeting.status))
-                                                    .padding(.horizontal, 6).padding(.vertical, 3)
-                                                    .background(statusColor(meeting.status).opacity(0.10), in: Capsule())
-                                                    .fixedSize()
-                                            }.font(.system(size: 11)).foregroundStyle(.secondary)
-                                        }
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-                                        .contentShape(Rectangle())
-                                    }
-                                    .buttonStyle(.plain)
-                                    .accessibilityAddTraits(selection == meeting.id ? .isSelected : [])
-                                    .accessibilityIdentifier("meeting-\(meeting.id)")
-                                }
-                                .padding(.horizontal, 10).padding(.vertical, 8)
-                                .background(selection == meeting.id ? Color.accentColor.opacity(0.17) : .clear,
-                                            in: RoundedRectangle(cornerRadius: 8))
-                                .overlay {
-                                    if selection == meeting.id && listHasFocus {
-                                        RoundedRectangle(cornerRadius: 8).strokeBorder(Color.accentColor.opacity(0.72), lineWidth: 1)
-                                    }
-                                }
-                                .id(meeting.id)
+                                MeetingRow(meeting: meeting,
+                                           selected: selection == meeting.id,
+                                           focused: selection == meeting.id && listHasFocus,
+                                           showsCheckbox: !markedMeetingIDs.isEmpty,
+                                           marked: Binding(
+                                               get: { markedMeetingIDs.contains(meeting.id) },
+                                               set: { marked in
+                                                   selection = meeting.id
+                                                   focusList()
+                                                   if marked { markedMeetingIDs.insert(meeting.id) }
+                                                   else { markedMeetingIDs.remove(meeting.id) }
+                                               }
+                                           )) { select(meeting, proxy: proxy) }
+                                    .id(meeting.id)
                             }
                             if filteredMeetings.isEmpty {
                                 Text(searchText.isEmpty ? "No meetings yet" : "No matching meetings")
@@ -440,8 +409,8 @@ struct LibraryView: View {
                 }
                 .frame(height: 24)
             }
-            .padding(16).frame(width: 264)
-            .background(Color(nsColor: .controlBackgroundColor).opacity(0.4))
+            .padding(16).padding(.top, 28).frame(width: 264)
+            .background(SidebarMaterial())
             Divider()
             if let meeting = selected {
                 MeetingDetail(meeting: meeting, controller: controller, tab: $tab, contentFocused: $detailFocused, scrollTarget: detailScrollTarget)
@@ -453,6 +422,7 @@ struct LibraryView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+        .ignoresSafeArea(.container, edges: .top)
         .background(Color(nsColor: .windowBackgroundColor))
         .frame(minWidth: 650, minHeight: 460)
         .background(LibraryKeyMonitor(handle: handleKey).frame(width: 0, height: 0))
@@ -629,14 +599,91 @@ struct LibraryView: View {
         selection = id
         detailFocused = false
     }
+}
 
+private struct MeetingRow: View {
+    let meeting: Meeting
+    let selected: Bool
+    let focused: Bool
+    let showsCheckbox: Bool
+    @Binding var marked: Bool
+    let open: () -> Void
+    @ViewState private var hovered = false
 
-    private func statusColor(_ status: String) -> Color { status == "failed" ? .red : status == "waiting_for_limit" ? .orange : status == "complete" || status == "transcribed" ? .green : .secondary }
-    private func meetingDate(_ value: String) -> String {
-        guard let date = ISO8601DateFormatter().date(from: value) else { return value }
-        return DateFormatter.localizedString(from: date, dateStyle: .short, timeStyle: .short)
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Toggle("Select \(meeting.title)", isOn: $marked)
+                .toggleStyle(.checkbox)
+                .labelsHidden()
+                .opacity(showsCheckbox || hovered || marked ? 1 : 0)
+                .accessibilityIdentifier("select-meeting-\(meeting.id)")
+            Button(action: open) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(meeting.title).font(.system(size: 13, weight: .semibold)).lineLimit(2).help(meeting.title)
+                    HStack(spacing: 6) {
+                        Text(rowDate).lineLimit(1)
+                        Spacer(minLength: 6)
+                        // Complete is the normal end state, so only other states get a badge.
+                        if meeting.status != "complete" {
+                            HStack(spacing: 4) {
+                                if meeting.status == "recording" { Circle().fill(.red).frame(width: 5, height: 5) }
+                                Text(meeting.statusLabel)
+                            }
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(statusColor)
+                            .padding(.horizontal, 6).padding(.vertical, 2)
+                            .background(statusColor.opacity(0.12), in: Capsule())
+                            .fixedSize()
+                        }
+                    }.font(.system(size: 11)).foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityAddTraits(selected ? .isSelected : [])
+            .accessibilityIdentifier("meeting-\(meeting.id)")
+        }
+        .padding(.horizontal, 10).padding(.vertical, 8)
+        .background(selected ? Color.accentColor.opacity(0.17) : hovered ? Color.primary.opacity(0.05) : .clear,
+                    in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            if focused {
+                RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Color.accentColor.opacity(0.6), lineWidth: 1)
+            }
+        }
+        .onHover { hovered = $0 }
+    }
+
+    private var statusColor: Color {
+        switch meeting.status {
+        case "failed", "recording": return .red
+        case "waiting_for_limit": return .orange
+        case "transcribed": return .blue
+        default: return .secondary
+        }
+    }
+
+    private var rowDate: String {
+        guard let date = ISO8601DateFormatter().date(from: meeting.created_at) else { return meeting.created_at }
+        let sameYear = Calendar.current.isDate(date, equalTo: Date(), toGranularity: .year)
+        return date.formatted(sameYear ? .dateTime.day().month(.abbreviated).hour().minute()
+                                       : .dateTime.day().month(.abbreviated).year().hour().minute())
     }
 }
+
+private struct SidebarMaterial: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let view = NSVisualEffectView()
+        view.material = .sidebar
+        view.blendingMode = .behindWindow
+        view.state = .followsWindowActiveState
+        return view
+    }
+
+    func updateNSView(_ view: NSVisualEffectView, context: Context) {}
+}
+
 struct MeetingDetail: View {
     let meeting: Meeting
     @ObservedObject var controller: CatetController
@@ -662,7 +709,7 @@ struct MeetingDetail: View {
             HStack(alignment: .top, spacing: 16) {
                 VStack(alignment: .leading, spacing: 8) {
                     Text(meeting.title).font(.system(size: 22, weight: .semibold)).lineLimit(2).help(meeting.title)
-                    Text("\(meetingDate(meeting.created_at)) · \(meeting.statusLabel)")
+                    Text(meeting.status == "complete" ? meetingDate(meeting.created_at) : "\(meetingDate(meeting.created_at)) · \(meeting.statusLabel)")
                         .font(.system(size: 12)).foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 0)
@@ -741,7 +788,7 @@ struct MeetingDetail: View {
                 } else if tab == 0 { transcriptOutput }
                 else { momOutput }
             }.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        }.padding(24).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }.padding(24).padding(.top, 20).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("meeting-detail-\(meeting.id)")
             .simultaneousGesture(TapGesture().onEnded { contentFocused = true })
