@@ -44,8 +44,10 @@ struct Meeting: Identifiable, Codable, Equatable {
         try c.encodeIfPresent(failed_step, forKey: .failed_step)
     }
 
-    private static let retryDateFormatter = ISO8601DateFormatter()
-    var retryDate: Date? { retry_at.flatMap { Self.retryDateFormatter.date(from: $0) } }
+    // Creating ISO8601DateFormatter is expensive, and list rows read dates on every render.
+    private static let dateFormatter = ISO8601DateFormatter()
+    var retryDate: Date? { retry_at.flatMap { Self.dateFormatter.date(from: $0) } }
+    var createdDate: Date? { Self.dateFormatter.date(from: created_at) }
     var isUsageLimited: Bool {
         error_kind == "usage_limit" || (error?.localizedCaseInsensitiveContains("hit your usage limit") == true)
     }

@@ -230,6 +230,11 @@ fileprivate final class LibraryScrollTarget: ObservableObject {
     weak var scrollView: NSScrollView?
 }
 
+// Plain reference so key handling can flag repeats without re-rendering the library.
+fileprivate final class KeyRepeatState: ObservableObject {
+    var active = false
+}
+
 private struct ScrollViewCapture: NSViewRepresentable {
     let target: LibraryScrollTarget
 
@@ -269,10 +274,14 @@ struct LibraryView: View {
     private var listHasFocus: Bool { !searchFocused && !detailFocused }
     @ViewState private var helpPresented = false
     @StateObject private var detailScrollTarget = LibraryScrollTarget()
+    @StateObject private var keyRepeat = KeyRepeatState()
+    @ViewState private var detailID: String?
+    @ViewState private var detailTask: Task<Void, Never>?
     @ViewState private var pendingG = false
     @FocusState private var searchFocused: Bool
 
     private var selected: Meeting? { filteredMeetings.first { $0.id == selection } ?? filteredMeetings.first }
+    private var detailMeeting: Meeting? { filteredMeetings.first { $0.id == (detailID ?? selection) } ?? selected }
     private var filteredMeetings: [Meeting] {
         guard !searchText.isEmpty else { return controller.meetings }
         return controller.meetings.filter { $0.title.localizedStandardContains(searchText) }
@@ -330,15 +339,15 @@ struct LibraryView: View {
                                            selected: selection == meeting.id,
                                            focused: selection == meeting.id && listHasFocus,
                                            showsCheckbox: !markedMeetingIDs.isEmpty,
-                                           marked: Binding(
-                                               get: { markedMeetingIDs.contains(meeting.id) },
-                                               set: { marked in
-                                                   selection = meeting.id
-                                                   focusList()
-                                                   if marked { markedMeetingIDs.insert(meeting.id) }
-                                                   else { markedMeetingIDs.remove(meeting.id) }
-                                               }
-                                           )) { select(meeting, proxy: proxy) }
+                                           marked: markedMeetingIDs.contains(meeting.id),
+                                           mark: { marked in
+                                               selection = meeting.id
+                                               focusList()
+                                               if marked { markedMeetingIDs.insert(meeting.id) }
+                                               else { markedMeetingIDs.remove(meeting.id) }
+                                           },
+                                           open: { select(meeting, proxy: proxy) })
+                                    .equatable()
                                     .id(meeting.id)
                             }
                             if filteredMeetings.isEmpty {
@@ -350,9 +359,8 @@ struct LibraryView: View {
                     }
                     .scrollIndicators(.automatic)
                     .onChange(of: selection) { _, id in
-                        if let id, filteredMeetings.contains(where: { $0.id == id }) {
-                            withAnimation(.easeInOut(duration: 0.15)) { proxy.scrollTo(id, anchor: nil) }
-                        }
+                        // Animating every step makes held j/k keys queue up overlapping scroll animations.
+                        if let id, filteredMeetings.contains(where: { $0.id == id }) { proxy.scrollTo(id, anchor: nil) }
                     }
                     .onChange(of: searchText) { _, _ in
                         markedMeetingIDs.removeAll()
@@ -412,9 +420,8 @@ struct LibraryView: View {
             .padding(16).padding(.top, 28).frame(width: 264)
             .background(SidebarMaterial())
             Divider()
-            if let meeting = selected {
+            if let meeting = detailMeeting {
                 MeetingDetail(meeting: meeting, controller: controller, tab: $tab, contentFocused: $detailFocused, scrollTarget: detailScrollTarget)
-                    .id(meeting.id)
             } else {
                 ContentUnavailableView(searchText.isEmpty ? "No meetings yet" : "No matching meetings",
                                        systemImage: searchText.isEmpty ? "waveform" : "magnifyingglass",
@@ -429,6 +436,18 @@ struct LibraryView: View {
         .onAppear {
             if selection == nil { selection = controller.meetings.first?.id }
         }
+        .onChange(of: selection) { _, id in
+            detailTask?.cancel()
+            // While a navigation key is held, rebuild the detail only after the keys settle.
+            guard keyRepeat.active else { detailID = id; return }
+            keyRepeat.active = false
+            detailTask = Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(150))
+                guard !Task.isCancelled else { return }
+                detailID = id
+            }
+        }
+        .onDisappear { detailTask?.cancel() }
         .onChange(of: controller.meetings) { _, _ in
             let ids = filteredMeetings.map(\.id)
             markedMeetingIDs.formIntersection(ids)
@@ -444,6 +463,7 @@ struct LibraryView: View {
         let option = flags.contains(.option)
         let shift = flags.contains(.shift)
         let key = event.charactersIgnoringModifiers?.lowercased() ?? ""
+        keyRepeat.active = event.isARepeat
         if helpPresented && event.keyCode == 53 {
             helpPresented = false
             return true
@@ -601,18 +621,25 @@ struct LibraryView: View {
     }
 }
 
-private struct MeetingRow: View {
+// Equatable so a selection change re-renders only the rows whose state changed.
+private struct MeetingRow: View, Equatable {
     let meeting: Meeting
     let selected: Bool
     let focused: Bool
     let showsCheckbox: Bool
-    @Binding var marked: Bool
+    let marked: Bool
+    let mark: (Bool) -> Void
     let open: () -> Void
     @ViewState private var hovered = false
 
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.meeting == rhs.meeting && lhs.selected == rhs.selected && lhs.focused == rhs.focused
+            && lhs.showsCheckbox == rhs.showsCheckbox && lhs.marked == rhs.marked
+    }
+
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
-            Toggle("Select \(meeting.title)", isOn: $marked)
+            Toggle("Select \(meeting.title)", isOn: Binding(get: { marked }, set: mark))
                 .toggleStyle(.checkbox)
                 .labelsHidden()
                 .opacity(showsCheckbox || hovered || marked ? 1 : 0)
@@ -665,7 +692,7 @@ private struct MeetingRow: View {
     }
 
     private var rowDate: String {
-        guard let date = ISO8601DateFormatter().date(from: meeting.created_at) else { return meeting.created_at }
+        guard let date = meeting.createdDate else { return meeting.created_at }
         let sameYear = Calendar.current.isDate(date, equalTo: Date(), toGranularity: .year)
         return date.formatted(sameYear ? .dateTime.day().month(.abbreviated).hour().minute()
                                        : .dateTime.day().month(.abbreviated).year().hour().minute())
@@ -690,7 +717,9 @@ struct MeetingDetail: View {
     @Binding var tab: Int
     @Binding var contentFocused: Bool
     fileprivate let scrollTarget: LibraryScrollTarget
-    @ViewState private var outputs: LoadedOutputs?
+    @ViewState private var loadedOutputs: LoadedOutputs?
+    // The detail view is reused across meetings, so ignore outputs that belong to the previous meeting.
+    private var outputs: LoadedOutputs? { loadedOutputs?.directory == meeting.directory ? loadedOutputs : nil }
     private var transcript: String { outputs?.transcript ?? "" }
     private var mom: String { outputs?.mom ?? "" }
     private var transcriptSegments: [TranscriptSegment] { outputs?.segments ?? [] }
@@ -709,7 +738,7 @@ struct MeetingDetail: View {
             HStack(alignment: .top, spacing: 16) {
                 VStack(alignment: .leading, spacing: 8) {
                     Text(meeting.title).font(.system(size: 22, weight: .semibold)).lineLimit(2).help(meeting.title)
-                    Text(meeting.status == "complete" ? meetingDate(meeting.created_at) : "\(meetingDate(meeting.created_at)) · \(meeting.statusLabel)")
+                    Text(meeting.status == "complete" ? createdText : "\(createdText) · \(meeting.statusLabel)")
                         .font(.system(size: 12)).foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 0)
@@ -782,11 +811,8 @@ struct MeetingDetail: View {
                 }
             }
             Group {
-                if outputs == nil {
-                    ProgressView().controlSize(.small)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else if tab == 0 { transcriptOutput }
-                else { momOutput }
+                if tab == 0 { transcriptOutput }
+                else { momOutput.id(meeting.id) }
             }.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }.padding(24).padding(.top, 20).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .accessibilityElement(children: .contain)
@@ -833,48 +859,37 @@ struct MeetingDetail: View {
         .accessibilityIdentifier("meeting-recovery")
     }
     private var transcriptOutput: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 12) {
-                if outputs?.isLivePreview == true {
-                    HStack(spacing: 8) {
-                        Label("Live transcript · preview", systemImage: "waveform")
-                            .font(.system(size: 12, weight: .medium)).foregroundStyle(.secondary)
-                        Spacer()
-                        if !controller.liveTranscriptionStatusMessage.isEmpty {
-                            Text(controller.liveTranscriptionStatusMessage).font(.system(size: 11)).foregroundStyle(.secondary)
-                        }
+        VStack(alignment: .leading, spacing: 0) {
+            if outputs?.isLivePreview == true {
+                HStack(spacing: 8) {
+                    Label("Live transcript · preview", systemImage: "waveform")
+                        .font(.system(size: 12, weight: .medium)).foregroundStyle(.secondary)
+                    Spacer()
+                    if !controller.liveTranscriptionStatusMessage.isEmpty {
+                        Text(controller.liveTranscriptionStatusMessage).font(.system(size: 11)).foregroundStyle(.secondary)
                     }
                 }
-                if transcriptSegments.isEmpty {
-                    Text(transcript.isEmpty ? "No transcript yet." : transcript)
-                        .font(.system(size: 14)).lineSpacing(5)
-                        .foregroundStyle(transcript.isEmpty ? .secondary : .primary)
-                } else {
-                    ForEach(transcriptSegments.indices, id: \.self) { index in
-                        let segment = transcriptSegments[index]
-                        HStack(alignment: .firstTextBaseline, spacing: 12) {
-                            Text(shortTimestamp(segment.start))
-                                .font(.system(size: 11, weight: .medium, design: .monospaced))
-                                .foregroundStyle(.secondary)
-                                .frame(width: 54, alignment: .leading)
-                            Text(segment.text).font(.system(size: 14)).lineSpacing(5)
-                        }
-                    }
-                }
+                .padding([.horizontal, .top], 20)
             }
-            .frame(maxWidth: 760, alignment: .leading)
-            .frame(maxWidth: .infinity, alignment: .center)
-            .textSelection(.enabled)
-            .padding(20)
-            .background(ScrollViewCapture(target: scrollTarget).frame(width: 0, height: 0))
+            // Keep the text view alive while switching meetings; rebuilding it is the expensive part.
+            TranscriptTextView(content: TranscriptContent(id: meeting.directory, segments: transcriptSegments, plainText: transcript),
+                               scrollTarget: scrollTarget) { contentFocused = true }
+                .overlay(alignment: .topLeading) {
+                    if outputs != nil && transcriptSegments.isEmpty && transcript.isEmpty {
+                        Text("No transcript yet.").font(.system(size: 14)).foregroundStyle(.secondary).padding(20)
+                    }
+                }
         }
         .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.secondary.opacity(0.12)))
     }
     private var momOutput: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 14) {
-                if mom.isEmpty {
+                if outputs == nil {
+                    EmptyView()
+                } else if mom.isEmpty {
                     Text("No meeting notes yet.").foregroundStyle(.secondary)
                 } else if minutesBlocks.isEmpty {
                     Text(mom).font(.system(size: 14)).lineSpacing(5)
@@ -904,7 +919,6 @@ struct MeetingDetail: View {
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.secondary.opacity(0.12)))
     }
     private struct TranscriptDocument: Decodable { let segments: [TranscriptSegment] }
-    private struct TranscriptSegment: Decodable, Sendable { let start: TimeInterval; let text: String }
     private struct MinutesBlock: Identifiable, Sendable {
         let id: Int
         let text: AttributedString
@@ -921,14 +935,10 @@ struct MeetingDetail: View {
         let segments: [TranscriptSegment]
         let minutes: [MinutesBlock]
         let isLivePreview: Bool
+        let directory: URL
     }
-    private func shortTimestamp(_ seconds: Double) -> String {
-        let value = Int(seconds)
-        if value >= 3600 { return String(format: "%02d:%02d:%02d", value / 3600, value / 60 % 60, value % 60) }
-        return String(format: "%02d:%02d", value / 60, value % 60)
-    }
-    private func meetingDate(_ value: String) -> String {
-        guard let date = ISO8601DateFormatter().date(from: value) else { return value }
+    private var createdText: String {
+        guard let date = meeting.createdDate else { return meeting.created_at }
         return DateFormatter.localizedString(from: date, dateStyle: .medium, timeStyle: .short)
     }
     @MainActor private func loadOutputsWhileActive() async {
@@ -947,7 +957,7 @@ struct MeetingDetail: View {
             work.cancel()
         }
         guard !Task.isCancelled, let loaded else { return }
-        outputs = loaded
+        loadedOutputs = loaded
     }
 
     nonisolated private static func readOutputs(in directory: URL) throws -> LoadedOutputs {
@@ -984,7 +994,99 @@ struct MeetingDetail: View {
         }
         try Task.checkCancellation()
         return LoadedOutputs(transcript: transcript, mom: mom, segments: segments, minutes: minutes,
-                             isLivePreview: !finalTranscriptExists)
+                             isLivePreview: !finalTranscriptExists, directory: directory)
+    }
+}
+
+fileprivate struct TranscriptSegment: Decodable, Equatable, Sendable { let start: TimeInterval; let text: String }
+
+// Long transcripts render as one AppKit text view. A SwiftUI Text per segment made each meeting switch take ~90 ms.
+private struct TranscriptTextView: NSViewRepresentable {
+    let content: TranscriptContent
+    let scrollTarget: LibraryScrollTarget
+    let focus: () -> Void
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let textView = TranscriptNSTextView()
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.drawsBackground = false
+        textView.minSize = .zero
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.isVerticallyResizable = true
+        textView.autoresizingMask = [.width]
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
+        let scrollView = NSScrollView()
+        scrollView.drawsBackground = false
+        scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.documentView = textView
+        return scrollView
+    }
+
+    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        scrollTarget.scrollView = scrollView
+        guard let textView = scrollView.documentView as? TranscriptNSTextView else { return }
+        textView.focus = focus
+        guard textView.content != content else { return }
+        let otherMeeting = textView.content?.id != content.id
+        textView.content = content
+        textView.textStorage?.setAttributedString(Self.render(content))
+        if otherMeeting { textView.scroll(.zero) }
+    }
+
+    private static func render(_ content: TranscriptContent) -> NSAttributedString {
+        let body = NSFont.systemFont(ofSize: 14)
+        guard !content.segments.isEmpty else {
+            let style = NSMutableParagraphStyle()
+            style.lineSpacing = 5
+            return NSAttributedString(string: content.plainText, attributes: [.font: body, .foregroundColor: NSColor.labelColor, .paragraphStyle: style])
+        }
+        let indent: CGFloat = 66
+        let style = NSMutableParagraphStyle()
+        style.lineSpacing = 5
+        style.paragraphSpacing = 7
+        style.tabStops = [NSTextTab(textAlignment: .left, location: indent)]
+        style.headIndent = indent
+        let time: [NSAttributedString.Key: Any] = [.font: NSFont.monospacedSystemFont(ofSize: 11, weight: .medium),
+                                                    .foregroundColor: NSColor.secondaryLabelColor, .paragraphStyle: style]
+        let text: [NSAttributedString.Key: Any] = [.font: body, .foregroundColor: NSColor.labelColor, .paragraphStyle: style]
+        let result = NSMutableAttributedString()
+        for (index, segment) in content.segments.enumerated() {
+            result.append(NSAttributedString(string: shortTimestamp(segment.start) + "\t", attributes: time))
+            result.append(NSAttributedString(string: segment.text + (index == content.segments.count - 1 ? "" : "\n"), attributes: text))
+        }
+        return result
+    }
+
+    private static func shortTimestamp(_ seconds: Double) -> String {
+        let value = Int(seconds)
+        if value >= 3600 { return String(format: "%02d:%02d:%02d", value / 3600, value / 60 % 60, value % 60) }
+        return String(format: "%02d:%02d", value / 60, value % 60)
+    }
+}
+
+private struct TranscriptContent: Equatable {
+    let id: URL
+    let segments: [TranscriptSegment]
+    let plainText: String
+}
+
+private final class TranscriptNSTextView: NSTextView {
+    var content: TranscriptContent?
+    var focus: (() -> Void)?
+
+    // Keep the transcript column readable on wide windows.
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        let inset = NSSize(width: max(20, (newSize.width - 760) / 2), height: 20)
+        if textContainerInset != inset { textContainerInset = inset }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        focus?()
+        super.mouseDown(with: event)
     }
 }
 
