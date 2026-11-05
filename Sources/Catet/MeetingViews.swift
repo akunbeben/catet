@@ -41,7 +41,7 @@ struct FloatingPill: View {
     private var showsKeyboardHints: Bool { expanded && controller.quickRecordingKeyboardActive }
     // Idle, the full card slides out from the screen edge like a drawer; collapsed, only its edge shows.
     private var cardWidth: CGFloat { Self.surfaceWidth(mode, expanded: mode == .idle || expanded) }
-    private var cardOffset: CGFloat { mode == .idle && !expanded ? Self.surfaceWidth(.idle, expanded: false) - cardWidth : 0 }
+    private var visibleWidth: CGFloat { Self.surfaceWidth(mode, expanded: expanded) }
     private var animation: Animation? { reduceMotion ? nil : .smooth(duration: Self.animationDuration) }
     private var finishingMessage: String {
         controller.liveTranscriptionStatusMessage.isEmpty ? "Finishing transcript" : controller.liveTranscriptionStatusMessage
@@ -68,7 +68,9 @@ struct FloatingPill: View {
                 .overlay(RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous).strokeBorder(.white.opacity(0.1), lineWidth: 0.5))
                 .shadow(color: .black.opacity(0.3), radius: 8, y: 3)
         }
-        .offset(x: cardOffset)
+        // The visible width matches the panel, so the card never makes the root wider than the window.
+        // Trailing alignment pushes the rest of a wider card past the screen edge.
+        .frame(width: visibleWidth, alignment: .trailing)
         .padding(EdgeInsets(top: Self.hoverPadding, leading: 0, bottom: Self.hoverPadding, trailing: Self.hoverPadding))
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .contentShape(Rectangle())
