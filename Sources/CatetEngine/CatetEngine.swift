@@ -705,7 +705,6 @@ private func transcribe(_ directory: URL, config: RuntimeConfig) throws {
         "error": NSNull(), "error_kind": NSNull(), "retry_at": NSNull(), "failed_step": NSNull()
     ])
     defer { try? FileManager.default.removeItem(at: directory.appendingPathComponent("audio.wav")) }
-    try? FileManager.default.removeItem(at: directory.appendingPathComponent("transcript.raw.json"))
     let audio = try prepareAudio(in: directory, config: config)
     let output = directory.appendingPathComponent("transcription.json")
     try? FileManager.default.removeItem(at: output)
@@ -719,6 +718,8 @@ private func transcribe(_ directory: URL, config: RuntimeConfig) throws {
         throw EngineError("No speech was detected. Check the audio source and try another recording.")
     }
     try writeTranscript(segments, to: directory)
+    // The previous uncorrected wording belongs to the replaced transcript. Keep it until the new one is saved.
+    try? FileManager.default.removeItem(at: directory.appendingPathComponent("transcript.raw.json"))
 }
 
 private func humanAccountFailure(_ error: CodexAccountsError) -> EngineFailure {
@@ -1072,7 +1073,8 @@ private func recoverInterruptedStatus(_ directory: URL) throws {
     ])
 }
 
-func processMeeting(_ directory: URL, root: URL, withMom: Bool, config: RuntimeConfig) throws -> String? {
+func processMeeting(_ directory: URL, root: URL, withMom: Bool, retranscribe: Bool = false,
+                    config: RuntimeConfig) throws -> String? {
     let meeting = try validateMeeting(directory)
     let lock = try MeetingLock(directory: meeting, root: root)
     defer { lock.unlock() }
@@ -1080,7 +1082,7 @@ func processMeeting(_ directory: URL, root: URL, withMom: Bool, config: RuntimeC
     var hasTranscript = false
     do { _ = try readTranscript(from: meeting); hasTranscript = true }
     catch { hasTranscript = false }
-    if !hasTranscript {
+    if retranscribe || !hasTranscript {
         do { try transcribe(meeting, config: config) }
         catch { recordFailure(meeting, step: "transcribe", error: error); throw error }
     }
@@ -1237,7 +1239,7 @@ Usage: CatetEngine [--root ROOT] COMMAND [OPTIONS]
 Commands:
   list [--json]
   import AUDIO [--title TITLE]
-  process DIRECTORY [--mom]
+  process DIRECTORY [--mom] [--retranscribe]
   compact DIRECTORY            Archive WAV recording channels as Ogg Opus
   retry-notes DIRECTORY      Retry due notes with their original account
   mom DIRECTORY              Create meeting notes with Codex
@@ -1336,13 +1338,15 @@ struct CatetEngineMain {
                 print(try compactMeeting(expandPath(rest[0]), root: args.root, config: config).path)
             case "process":
                 let rest = Array(args.command.dropFirst())
-                let directories = rest.filter { $0 != "--mom" && !$0.hasPrefix("-") }
-                guard directories.count == 1, rest.filter({ $0 == "--mom" }).count <= 1,
-                      rest.allSatisfy({ $0 == "--mom" || !$0.hasPrefix("-") }) else {
+                let flags = ["--mom", "--retranscribe"]
+                let directories = rest.filter { !$0.hasPrefix("-") }
+                guard directories.count == 1, flags.allSatisfy({ flag in rest.filter { $0 == flag }.count <= 1 }),
+                      rest.allSatisfy({ flags.contains($0) || !$0.hasPrefix("-") }) else {
                     Darwin.exit(usageError("invalid process arguments"))
                 }
                 let config = try RuntimeConfig.load()
-                if let result = try processMeeting(expandPath(directories[0]), root: args.root, withMom: rest.contains("--mom"), config: config) { print(result) }
+                if let result = try processMeeting(expandPath(directories[0]), root: args.root, withMom: rest.contains("--mom"),
+                                                   retranscribe: rest.contains("--retranscribe"), config: config) { print(result) }
             case "retry-notes":
                 let rest = Array(args.command.dropFirst())
                 guard rest.count == 1, !rest[0].hasPrefix("-") else {

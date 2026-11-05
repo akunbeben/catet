@@ -15,7 +15,7 @@ Requires Apple Silicon, macOS 14+, Apple’s command-line tools, Nix, Codex CLI 
 ./catet open
 ```
 
-Setup installs `/Applications/Catet.app`. Setup and the first recording need internet to download models. Later recordings use the cached models offline.
+Setup installs `/Applications/Catet.app`. The first transcription needs internet to download the model. Later recordings use the cached model offline.
 
 ## Use
 

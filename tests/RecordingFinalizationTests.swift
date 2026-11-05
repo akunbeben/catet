@@ -26,25 +26,25 @@ struct RecordingFinalizationTests {
         }
         let store = MeetingStore()
         try store.createRoot()
-        let whisper = temp.appendingPathComponent("whisper")
         let codex = temp.appendingPathComponent("codex")
         let calls = temp.appendingPathComponent("batch-calls")
         let fail = temp.appendingPathComponent("fail")
         // Exercise the real engine and codecs, substituting only the transcription model.
-        let runtime = Bundle.main.executableURL!.deletingLastPathComponent().appendingPathComponent("runtime.json")
+        let binDirectory = Bundle.main.executableURL!.deletingLastPathComponent()
+        let runtime = binDirectory.appendingPathComponent("runtime.json")
         let configuredRuntime = try JSONSerialization.jsonObject(with: Data(contentsOf: runtime)) as! [String: Any]
         let ffmpegPath = configuredRuntime["ffmpeg"] as! String
-        try executable(whisper, """
+        // The engine runs the app binary beside it as the WhisperKit transcriber.
+        let transcriber = binDirectory.appendingPathComponent("Catet")
+        try executable(transcriber, """
         printf 'attempt\\n' >> '\(calls.path)'
         if [ -f '\(fail.path)' ]; then printf 'decoder failed\\n' >&2; exit 7; fi
-        while [ "$1" != '-of' ]; do shift; done
-        shift
-        printf '%s' '{"transcription":[{"offsets":{"from":0,"to":2000},"text":"Recovered from the complete saved recording."}]}' > "$1.json"
+        [ "$1" = '--transcribe-audio' ] && [ -s "$2" ]
+        printf '%s' '{"segments":[{"start":0,"end":2,"text":"Recovered from the complete saved recording."}]}' > "$3"
         """)
+        defer { try? fm.removeItem(at: transcriber) }
         try executable(codex, "exit 99")
-        try JSONSerialization.data(withJSONObject: ["ffmpeg": ffmpegPath, "whisper": whisper.path,
-            "model": temp.appendingPathComponent("model").path, "vad": temp.appendingPathComponent("vad").path,
-            "codex": codex.path]).write(to: runtime)
+        try JSONSerialization.data(withJSONObject: ["ffmpeg": ffmpegPath, "codex": codex.path]).write(to: runtime)
         defer { try? fm.removeItem(at: runtime) }
         try JSONSerialization.data(withJSONObject: ["command": ["/usr/bin/true"]])
             .write(to: temp.appendingPathComponent("hooks.json"))
@@ -126,6 +126,34 @@ struct RecordingFinalizationTests {
                   "Live plus batch failure must publish exactly one final failure event")
         try check(try String(contentsOf: calls) == "attempt\nattempt\n", "Automatic retry must stop after one batch failure")
         print("PASS: Failed saved-audio retry preserves audio, publishes one final failure, and leaves manual retry available")
+
+        func retranscribe(_ meeting: Meeting) async -> Bool {
+            await withCheckedContinuation { continuation in
+                store.runEngine(meeting: meeting, command: "process", transcriptOnly: true, retranscribe: true) {
+                    if case .success = $0 { continuation.resume(returning: true) } else { continuation.resume(returning: false) }
+                }
+            }
+        }
+        let old = #"{"segments":[{"start":0,"end":1,"text":"Old transcript"}]}"#
+        try Data(old.utf8).write(to: failed.directory.appendingPathComponent("transcript.json"))
+        try Data(old.utf8).write(to: failed.directory.appendingPathComponent("transcript.raw.json"))
+        let failedRetranscription = await retranscribe(failed)
+        try check(!failedRetranscription, "A failed retranscription must report failure")
+        try check(try String(contentsOf: failed.directory.appendingPathComponent("transcript.json")) == old &&
+                  fm.fileExists(atPath: failed.directory.appendingPathComponent("transcript.raw.json").path),
+                  "A failed retranscription must keep the previous transcript and its original wording")
+        try check(store.meeting(id: failed.id)?.error_kind == "transcription", "A failed retranscription must offer manual retry")
+        try fm.removeItem(at: fail)
+        let retranscribed = await retranscribe(failed)
+        try check(retranscribed, "Retranscription must succeed from the saved audio")
+        try check(try String(contentsOf: failed.directory.appendingPathComponent("transcript.txt")).contains("Recovered from the complete saved recording.") &&
+                  !fm.fileExists(atPath: failed.directory.appendingPathComponent("transcript.raw.json").path) &&
+                  store.meeting(id: failed.id)?.status == "transcribed",
+                  "Transcribe again must replace an existing transcript instead of reusing it")
+        try check(try String(contentsOf: calls) == "attempt\nattempt\nattempt\nattempt\n",
+                  "Each retranscription must run one saved-audio pass")
+        try "attempt\nattempt\n".write(to: calls, atomically: true, encoding: .utf8)
+        print("PASS: Transcribe again replaces an existing transcript and keeps it when transcription fails")
 
         let live = try recording("Live transcription succeeds")
         try await store.finishTranscription(meeting: live, finishLive: {

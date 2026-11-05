@@ -5,11 +5,10 @@
     pkgs = import nixpkgs { system = "aarch64-darwin"; };
   in {
     packages.aarch64-darwin = {
-      whisper = pkgs.whisper-cpp;
       ffmpeg = pkgs.ffmpeg;
     };
     devShells.aarch64-darwin.default = pkgs.mkShell {
-      packages = [ pkgs.whisper-cpp pkgs.ffmpeg ];
+      packages = [ pkgs.ffmpeg ];
     };
   };
 }

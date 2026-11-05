@@ -146,8 +146,7 @@ struct AudioRegressionTests {
             try ("#!/bin/sh\n" + body.replacingOccurrences(of: "\\n", with: "\n") + "\n")
                 .write(to: encoder, atomically: true, encoding: .utf8)
             try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: encoder.path)
-            let config = ["ffmpeg": encoder.path, "whisper": "/unused", "model": "/unused",
-                          "vad": "/unused", "codex": "/unused"]
+            let config = ["ffmpeg": encoder.path, "codex": "/unused"]
             try JSONSerialization.data(withJSONObject: config).write(to: directory.appendingPathComponent("runtime.json"))
             let child = Process()
             child.executableURL = executable

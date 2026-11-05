@@ -124,15 +124,12 @@ struct EngineRegressionTests {
         try FileManager.default.createDirectory(at: meeting, withIntermediateDirectories: true)
         try writeMetadata(["id": meeting.lastPathComponent, "status": "recorded", "custom": ["keep": true]], to: meeting)
 
-        let parsed = try normalizeWhisper(["transcription": [
-            ["offsets": ["from": 1250, "to": 2500], "text": "  Keputusan rapat. "],
-            ["timestamps": ["from": "01:02:03,250", "to": "01:02:04,500"], "text": "Tindak lanjut."]
-        ]])
-        try require(parsed == [MeetingSegment(start: 1.25, end: 2.5, text: "Keputusan rapat."), MeetingSegment(start: 3723.25, end: 3724.5, text: "Tindak lanjut.")], "Whisper times must retain millisecond precision and hour offsets")
-        try rejects({ _ = try normalizeWhisper(["transcription": []]) }, "Empty audio must not become successful transcript")
-        try rejects({ _ = try normalizeWhisper(["transcription": [["offsets": ["from": 2000, "to": 1000], "text": "invalid"]]]) }, "Reversed time ranges must fail")
-        try rejects({ _ = try normalizeWhisper(["transcription": [["offsets": ["from": true, "to": 1000], "text": "invalid"]]]) }, "Boolean times must fail")
-        print("PASS: Whisper timestamp precision and invalid segment boundaries")
+        let parsed = try decodeSegments(Data(#"{"segments":[{"start":1.25,"end":2.5,"text":"  Keputusan rapat. "},{"start":3723.25,"end":3724.5,"text":"Tindak lanjut."}]}"#.utf8))
+        try require(parsed == [MeetingSegment(start: 1.25, end: 2.5, text: "Keputusan rapat."), MeetingSegment(start: 3723.25, end: 3724.5, text: "Tindak lanjut.")], "Transcriber times must retain millisecond precision and hour offsets")
+        try require(try decodeSegments(Data(#"{"segments":[]}"#.utf8)).isEmpty, "Silence must decode as no speech")
+        try rejects({ _ = try decodeSegments(Data(#"{"segments":[{"start":2,"end":1,"text":"invalid"}]}"#.utf8)) }, "Reversed time ranges must fail")
+        try rejects({ _ = try decodeSegments(Data(#"{"segments":[{"start":true,"end":1,"text":"invalid"}]}"#.utf8)) }, "Boolean times must fail")
+        print("PASS: Transcriber timestamp precision and invalid segment boundaries")
 
         let zone = TimeZone(identifier: "America/Los_Angeles")!
         let beforeReset = try date(year: 2026, month: 10, day: 16, hour: 9, minute: 45, timeZone: zone)
@@ -183,7 +180,7 @@ struct EngineRegressionTests {
         let speech = [MeetingSegment(start: 0, end: 1.5, text: "Benny menyiapkan rilis Jumat.")]
         try writeTranscript(speech, to: meeting)
         let missing = URL(fileURLWithPath: "/catet-regression-nonexistent-executable")
-        let config = RuntimeConfig(ffmpeg: missing, whisper: missing, model: missing, vad: missing, codex: missing)
+        let config = RuntimeConfig(ffmpeg: missing, transcriber: missing, codex: missing)
         try rejects({ _ = try processMeeting(meeting, root: root, withMom: true, config: config) }, "Missing Codex must fail instead of pretending MoM was generated")
         let failed = try readMetadata(from: meeting)
         try require(failed["status"] as? String == "failed" && failed["failed_step"] as? String == "mom", "MoM failure must identify recoverable step")
@@ -221,7 +218,7 @@ struct EngineRegressionTests {
         """
         try fixture.write(to: codex, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: codex.path)
-        let generatedConfig = RuntimeConfig(ffmpeg: missing, whisper: missing, model: missing, vad: missing, codex: codex)
+        let generatedConfig = RuntimeConfig(ffmpeg: missing, transcriber: missing, codex: codex)
         let expectedMinutes = "# Persiapan Rilis Jumat\n\nBenny menyiapkan rilis Jumat."
         try JSONSerialization.data(withJSONObject: ["title": "Persiapan Rilis Jumat", "mom": expectedMinutes]).write(to: response)
         let generated = try processMeeting(meeting, root: root, withMom: true, config: generatedConfig)
@@ -308,7 +305,7 @@ struct EngineRegressionTests {
         """
         try accountFixture.write(to: accountCodex, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: accountCodex.path)
-        let accountConfig = RuntimeConfig(ffmpeg: missing, whisper: missing, model: missing, vad: missing, codex: accountCodex)
+        let accountConfig = RuntimeConfig(ffmpeg: missing, transcriber: missing, codex: accountCodex)
         let alphaMeeting = try makeMeeting(root: root, status: "transcribed", speech: speech)
         let betaMeeting = try makeMeeting(root: root, status: "transcribed", speech: speech)
         setEnvironment("CATET_CODEX_ACCOUNT_ID", alpha.account.id)
@@ -339,7 +336,7 @@ struct EngineRegressionTests {
         """
         try authFixture.write(to: authCodex, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: authCodex.path)
-        let authConfig = RuntimeConfig(ffmpeg: missing, whisper: missing, model: missing, vad: missing, codex: authCodex)
+        let authConfig = RuntimeConfig(ffmpeg: missing, transcriber: missing, codex: authCodex)
         let authMeeting = try makeMeeting(root: root, status: "transcribed", speech: speech)
         let oldAuthMinutes = Data("# Existing minutes\\n".utf8)
         try oldAuthMinutes.write(to: authMeeting.appendingPathComponent("mom.md"))
@@ -379,7 +376,7 @@ struct EngineRegressionTests {
         """
         try unknownFixture.write(to: unknownCodex, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: unknownCodex.path)
-        let unknownConfig = RuntimeConfig(ffmpeg: missing, whisper: missing, model: missing, vad: missing, codex: unknownCodex)
+        let unknownConfig = RuntimeConfig(ffmpeg: missing, transcriber: missing, codex: unknownCodex)
         let unknownMeeting = try makeMeeting(root: root, status: "transcribed", speech: speech)
         setEnvironment("CATET_CODEX_ACCOUNT_ID", alpha.account.id)
         try rejects({ _ = try explicitMom(unknownMeeting, root: root, config: unknownConfig) },
@@ -410,7 +407,7 @@ struct EngineRegressionTests {
         """
         try eventFixture.write(to: eventCodex, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: eventCodex.path)
-        let eventConfig = RuntimeConfig(ffmpeg: missing, whisper: missing, model: missing, vad: missing, codex: eventCodex)
+        let eventConfig = RuntimeConfig(ffmpeg: missing, transcriber: missing, codex: eventCodex)
         let eventMeeting = try makeMeeting(root: root, status: "transcribed", speech: speech)
         let misleadingEvents = """
         {"type":"item.completed","item":{"type":"agent_message","text":"PRIVATE TRANSCRIPT ERROR: usage limit. Try again at 10:01 AM."}}
@@ -447,7 +444,7 @@ struct EngineRegressionTests {
         """
         try limitFixture.write(to: limitCodex, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: limitCodex.path)
-        let limitConfig = RuntimeConfig(ffmpeg: missing, whisper: missing, model: missing, vad: missing, codex: limitCodex)
+        let limitConfig = RuntimeConfig(ffmpeg: missing, transcriber: missing, codex: limitCodex)
         let firstRetry = try makeMeeting(root: root, status: "transcribed", speech: speech)
         let secondRetry = try makeMeeting(root: root, status: "transcribed", speech: speech)
         let preservedMinutes = Data("# Previously generated minutes\\n".utf8)

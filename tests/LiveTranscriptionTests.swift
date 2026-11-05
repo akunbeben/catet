@@ -276,6 +276,18 @@ struct LiveTranscriptionTests {
         print("PASS: Live transcription detects segments that skipped speech")
     }
 
+    static func testHallucinatedSegmentDetection() throws {
+        let thanks = LiveTranscriptSegment(start: 226, end: 256, text: "Terima kasih.")
+        try check(thanks.looksHallucinated(speechSeconds: 13), "A short phrase stretched over a whole window is invented")
+        try check(LiveTranscriptSegment(start: 201, end: 203.5, text: "Terima kasih.").looksHallucinated(speechSeconds: 0.1),
+                  "Text over inaudible audio is invented")
+        try check(!LiveTranscriptSegment(start: 190, end: 192, text: "oke").looksHallucinated(speechSeconds: 0.2),
+                  "A quiet short reply is kept")
+        try check(!LiveTranscriptSegment(start: 85, end: 110, text: "lanjutin yang itu dari data OS sama kalau itu sudah selesai").looksHallucinated(speechSeconds: 8.5),
+                  "A long segment with real speech is kept")
+        print("PASS: Saved-audio transcription drops invented phrases over quiet chunks")
+    }
+
     static func main() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("catet-live-transcription-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -287,6 +299,7 @@ struct LiveTranscriptionTests {
         try testRecoveryBudget()
         try testLanguageVotes()
         try testTruncatedSegmentDetection()
+        try testHallucinatedSegmentDetection()
         print("All live-transcription regressions passed.")
     }
 }

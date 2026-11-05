@@ -9,6 +9,11 @@ struct LiveTranscriptSegment: Codable, Equatable, Sendable {
     func looksTruncated(speechSeconds: Double) -> Bool {
         end - start >= 8 && Double(text.split(whereSeparator: \.isWhitespace).count) < speechSeconds
     }
+
+    /// Whisper invents short phrases such as "Terima kasih." over quiet VAD chunks and stretches them to the window end.
+    func looksHallucinated(speechSeconds: Double) -> Bool {
+        speechSeconds < 0.2 || (end - start >= 20 && text.split(whereSeparator: \.isWhitespace).count <= 3)
+    }
 }
 
 enum LiveAudioWindow {

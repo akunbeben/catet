@@ -72,9 +72,9 @@ enum WhisperModel {
                 guard start.isFinite, end.isFinite, start >= 0, end > start, !text.isEmpty else { continue }
                 let first = min(samples.count, Int(start * Double(LiveAudioMixer.outputSampleRate)))
                 let last = min(samples.count, max(first, Int(end * Double(LiveAudioMixer.outputSampleRate))))
-                // Whisper invents phrases such as "Thank you." over digital silence.
-                guard !LiveAudioMixer.isDigitalSilence(samples[first..<last]) else { continue }
-                segments.append(LiveTranscriptSegment(start: start, end: end, text: text))
+                let segment = LiveTranscriptSegment(start: start, end: end, text: text)
+                guard !segment.looksHallucinated(speechSeconds: LiveAudioMixer.speechSeconds(samples[first..<last])) else { continue }
+                segments.append(segment)
             }
             segments.sort { $0.start == $1.start ? $0.end < $1.end : $0.start < $1.start }
         }

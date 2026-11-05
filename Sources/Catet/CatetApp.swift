@@ -644,7 +644,16 @@ final class CatetController: ObservableObject {
         }
         refresh()
     }
-    func retryTranscription(_ meeting: Meeting) { process(meeting, mom: false) }
+    func retryTranscription(_ meeting: Meeting) {
+        guard !store.isLocallyProcessing(meeting.id), !store.isProcessRunning(for: meeting) else { return }
+        // Replace an existing transcript from the saved audio. The old one stays if transcription fails.
+        store.runEngine(meeting: meeting, command: "process", transcriptOnly: true, retranscribe: true) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.applyEngineResult(result, to: meeting)
+            }
+        }
+    }
     func openFolder(_ meeting: Meeting) { NSWorkspace.shared.open(meeting.directory) }
 }
 

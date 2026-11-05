@@ -310,7 +310,7 @@ final class MeetingStore {
         lock.lock(); defer { lock.unlock() }
         return activeProcessIDs.contains(meetingID) || reservedMeetingLocks[meetingID] != nil || isMeetingLockHeld(meetingID)
     }
-    func runEngine(meeting: Meeting, command: String, transcriptOnly: Bool, accountID: String? = nil, completion: @escaping (Result<Void, Error>) -> Void) {
+    func runEngine(meeting: Meeting, command: String, transcriptOnly: Bool, retranscribe: Bool = false, accountID: String? = nil, completion: @escaping (Result<Void, Error>) -> Void) {
         let requestedAccountID: String?
         do {
             if command == "mom" || (command == "process" && !transcriptOnly) {
@@ -334,6 +334,7 @@ final class MeetingStore {
                 let p = Process(); p.executableURL = engine
                 var args = ["--root", self.root.path, command, meeting.directory.path]
                 if command == "process" && !transcriptOnly { args.append("--mom") }
+                if command == "process" && retranscribe { args.append("--retranscribe") }
                 p.arguments = args; p.currentDirectoryURL = meeting.directory
                 if let requestedAccountID {
                     var environment = ProcessInfo.processInfo.environment
