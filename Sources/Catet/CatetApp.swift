@@ -348,7 +348,7 @@ final class CatetController: ObservableObject {
         panel.onKeyboardEvent = { [weak self] event in self?.handleQuickRecordingKey(event) ?? false }
         panel.onKeyboardDismiss = { [weak self] in self?.dismissQuickRecordingKeyboard() }
         if let screen = NSScreen.main {
-            panel.setFrameOrigin(NSPoint(x: screen.visibleFrame.minX + 2, y: screen.visibleFrame.midY - size.height / 2))
+            panel.setFrameOrigin(NSPoint(x: screen.visibleFrame.minX, y: screen.visibleFrame.midY - size.height / 2))
         }
         panel.orderFrontRegardless(); pillWindow = panel
     }
@@ -356,7 +356,7 @@ final class CatetController: ObservableObject {
         if pillExpanded != expanded { pillExpanded = expanded }
         guard let panel = pillWindow, let screen = panel.screen ?? NSScreen.main else { return }
         let size = FloatingPill.panelSize(pillMode, expanded: expanded, keyboard: quickRecordingKeyboardActive)
-        let target = NSRect(x: screen.visibleFrame.minX + 2, y: panel.frame.maxY - size.height, width: size.width, height: size.height)
+        let target = NSRect(x: screen.visibleFrame.minX, y: panel.frame.maxY - size.height, width: size.width, height: size.height)
         pillResizeTask?.cancel()
         // SwiftUI animates the surface inside the panel. Grow the panel first, and shrink it only after the animation ends.
         let grown = NSRect(x: target.minX, y: min(target.minY, panel.frame.minY),

@@ -13,7 +13,8 @@ struct FloatingPill: View {
     static let surfaceHeight: CGFloat = 44
     static let keyboardHintHeight: CGFloat = 30
     static let animationDuration = 0.24
-    static let cornerRadius: CGFloat = 14
+    // Docked to the screen edge: flat on the left, rounded on the right.
+    static let cardShape = UnevenRoundedRectangle(bottomTrailingRadius: 14, topTrailingRadius: 14, style: .continuous)
 
     // Collapsed, the panel stays a quiet edge tab. While recording it keeps the timer visible.
     static func surfaceWidth(_ mode: Mode, expanded: Bool) -> CGFloat {
@@ -61,11 +62,11 @@ struct FloatingPill: View {
             }
         }
         .frame(width: cardWidth, alignment: .topLeading)
-        .clipShape(RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous))
+        .clipShape(Self.cardShape)
         .background {
-            RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous)
+            Self.cardShape
                 .fill(.regularMaterial)
-                .overlay(RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous).strokeBorder(.white.opacity(0.1), lineWidth: 0.5))
+                .overlay(Self.cardShape.strokeBorder(.white.opacity(0.1), lineWidth: 0.5))
                 .shadow(color: .black.opacity(0.3), radius: 8, y: 3)
         }
         // The visible width matches the panel, so the card never makes the root wider than the window.
