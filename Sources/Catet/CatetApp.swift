@@ -326,7 +326,7 @@ final class CatetController: ObservableObject {
     private func makePill() {
         let size = FloatingPill.panelSize(.idle, expanded: false, keyboard: false)
         let panel = FloatingPanel(contentRect: NSRect(origin: .zero, size: size), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
-        panel.level = .floating; panel.isOpaque = false; panel.backgroundColor = .clear; panel.hasShadow = true; panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        panel.level = .floating; panel.isOpaque = false; panel.backgroundColor = .clear; panel.hasShadow = false; panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         let content = NSHostingView(rootView: FloatingPill(controller: self))
         content.sizingOptions = []
         panel.contentView = content

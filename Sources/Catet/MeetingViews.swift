@@ -8,18 +8,19 @@ typealias ViewState<Value> = SwiftUI.State<Value>
 struct FloatingPill: View {
     enum Mode { case idle, recording, finishing }
 
-    static let hoverPadding: CGFloat = 12
+    // Leaves room for the hover margin and the SwiftUI shadow around the surface.
+    static let hoverPadding: CGFloat = 16
     static let surfaceHeight: CGFloat = 44
     static let keyboardHintHeight: CGFloat = 30
-    static let animationDuration = 0.28
+    static let animationDuration = 0.24
     static let cornerRadius: CGFloat = 14
 
     // Collapsed, the panel stays a quiet edge tab. While recording it keeps the timer visible.
     static func surfaceWidth(_ mode: Mode, expanded: Bool) -> CGFloat {
         switch (mode, expanded) {
         case (.idle, false): return 8
-        case (.recording, false): return 74
-        case (.finishing, false): return 36
+        case (.recording, false): return 84
+        case (.finishing, false): return 40
         case (.idle, true): return 232
         case (.recording, true), (.finishing, true): return 268
         }
@@ -38,32 +39,32 @@ struct FloatingPill: View {
     private var mode: Mode { controller.pillMode }
     private var expanded: Bool { controller.pillExpanded }
     private var showsKeyboardHints: Bool { expanded && controller.quickRecordingKeyboardActive }
-    private var animation: Animation? { reduceMotion ? nil : .spring(response: Self.animationDuration, dampingFraction: 0.86) }
+    private var animation: Animation? { reduceMotion ? nil : .smooth(duration: Self.animationDuration) }
     private var finishingMessage: String {
         controller.liveTranscriptionStatusMessage.isEmpty ? "Finishing transcript" : controller.liveTranscriptionStatusMessage
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            ZStack(alignment: .leading) {
-                if expanded {
-                    expandedContent.transition(.opacity)
-                } else {
-                    collapsedContent.transition(.opacity)
-                }
-            }
-            .frame(height: Self.surfaceHeight)
+            // Content is laid out at full width and revealed by the surface's clip,
+            // so status items keep their position while the surface grows or shrinks.
+            row
+                .frame(width: Self.surfaceWidth(mode, expanded: true), height: Self.surfaceHeight, alignment: .leading)
             if showsKeyboardHints {
                 Divider().opacity(0.5)
                 QuickRecordingKeyboardHints(recording: controller.isRecording)
-                    .frame(maxWidth: .infinity, minHeight: Self.keyboardHintHeight - 1)
+                    .frame(width: Self.surfaceWidth(mode, expanded: true), height: Self.keyboardHintHeight - 1)
                     .transition(.opacity)
             }
         }
-        .frame(width: Self.surfaceWidth(mode, expanded: expanded), alignment: .leading)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous).strokeBorder(.white.opacity(0.1), lineWidth: 0.5))
+        .frame(width: Self.surfaceWidth(mode, expanded: expanded), alignment: .topLeading)
         .clipShape(RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous))
+        .background {
+            RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous)
+                .fill(.regularMaterial)
+                .overlay(RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous).strokeBorder(.white.opacity(0.1), lineWidth: 0.5))
+                .shadow(color: .black.opacity(0.3), radius: 8, y: 3)
+        }
         .padding(EdgeInsets(top: Self.hoverPadding, leading: 0, bottom: Self.hoverPadding, trailing: Self.hoverPadding))
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .contentShape(Rectangle())
@@ -79,34 +80,24 @@ struct FloatingPill: View {
         .onDisappear { collapseTask?.cancel() }
     }
 
-    @ViewBuilder private var collapsedContent: some View {
+    @ViewBuilder private var row: some View {
         switch mode {
-        case .idle:
-            Capsule().fill(.white.opacity(0.4))
-                .frame(width: 2, height: 18)
-                .frame(maxWidth: .infinity)
-                .accessibilityLabel("Catet")
-                .help("Catet")
-        case .recording:
-            HStack(spacing: 6) {
-                RecordingDot(reduceMotion: reduceMotion)
-                timer.font(.system(size: 12, weight: .semibold).monospacedDigit())
-            }
-            .frame(maxWidth: .infinity)
-            .accessibilityElement(children: .combine)
-            .accessibilityLabel("Recording in progress")
-        case .finishing:
-            ProgressView().controlSize(.small)
-                .frame(maxWidth: .infinity)
-                .help(finishingMessage)
-                .accessibilityLabel("Finishing transcription")
+        case .idle: idleRow
+        case .recording: recordingRow
+        case .finishing: finishingRow
         }
     }
 
-    private var expandedContent: some View {
-        HStack(spacing: 10) {
-            switch mode {
-            case .idle:
+    private var idleRow: some View {
+        ZStack(alignment: .leading) {
+            Capsule().fill(.white.opacity(0.4))
+                .frame(width: 2, height: 18)
+                .padding(.leading, 3)
+                .opacity(expanded ? 0 : 1)
+                .accessibilityHidden(expanded)
+                .accessibilityLabel("Catet")
+                .help("Catet")
+            HStack(spacing: 10) {
                 Button { controller.beginRecordingFlow() } label: {
                     HStack(spacing: 6) {
                         Circle().fill(.white).frame(width: 7, height: 7)
@@ -123,10 +114,26 @@ struct FloatingPill: View {
                 if controller.quickRecordingShortcutAvailable && !showsKeyboardHints {
                     KeyboardKeycap(QuickRecordingShortcut.displayShortcut)
                 }
-            case .recording:
-                RecordingDot(reduceMotion: reduceMotion)
-                timer.font(.system(size: 15, weight: .semibold).monospacedDigit())
-                Spacer(minLength: 0)
+                libraryButton
+            }
+            .padding(.leading, 8)
+            .padding(.trailing, 8)
+            .opacity(expanded ? 1 : 0)
+            .allowsHitTesting(expanded)
+            .accessibilityHidden(!expanded)
+        }
+    }
+
+    private var recordingRow: some View {
+        HStack(spacing: 10) {
+            HStack(spacing: 7) {
+                RecordingDot(animated: !reduceMotion)
+                timer.font(.system(size: 13, weight: .semibold).monospacedDigit())
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Recording in progress")
+            Spacer(minLength: 0)
+            HStack(spacing: 10) {
                 sourceIcon(controller.micAvailable ? "mic.fill" : "mic.slash.fill", active: controller.micAvailable,
                            label: controller.micAvailable ? "Microphone on" : "Microphone unavailable")
                 sourceIcon(controller.systemAudioAvailable ? "speaker.wave.2.fill" : "speaker.slash.fill", active: controller.systemAudioAvailable,
@@ -140,28 +147,48 @@ struct FloatingPill: View {
                 .buttonStyle(PillButtonStyle())
                 .help("Stop recording")
                 .accessibilityLabel("Stop recording")
-            case .finishing:
-                ProgressView().controlSize(.small)
+                libraryButton
+            }
+            .opacity(expanded ? 1 : 0)
+            .allowsHitTesting(expanded)
+            .accessibilityHidden(!expanded)
+        }
+        .padding(.leading, 13)
+        .padding(.trailing, 8)
+    }
+
+    private var finishingRow: some View {
+        HStack(spacing: 10) {
+            ProgressView().controlSize(.small)
+                .frame(width: 16)
+                .help(finishingMessage)
+                .accessibilityLabel("Finishing transcription")
+            HStack(spacing: 10) {
                 Text(finishingMessage)
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
-                    .help(finishingMessage)
                 Spacer(minLength: 0)
+                libraryButton
             }
-            Button { controller.showLibrary() } label: {
-                Image(systemName: "list.bullet")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 28, height: 28)
-            }
-            .buttonStyle(PillButtonStyle(hoverFill: true))
-            .help("Open meetings")
-            .accessibilityLabel("Open meetings")
+            .opacity(expanded ? 1 : 0)
+            .allowsHitTesting(expanded)
+            .accessibilityHidden(!expanded)
         }
-        .padding(.leading, mode == .idle ? 8 : 14)
+        .padding(.leading, 12)
         .padding(.trailing, 8)
-        .frame(width: Self.surfaceWidth(mode, expanded: true), alignment: .leading)
+    }
+
+    private var libraryButton: some View {
+        Button { controller.showLibrary() } label: {
+            Image(systemName: "list.bullet")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 28, height: 28)
+        }
+        .buttonStyle(PillButtonStyle(hoverFill: true))
+        .help("Open meetings")
+        .accessibilityLabel("Open meetings")
     }
 
     @ViewBuilder private var timer: some View {
@@ -220,18 +247,18 @@ private struct PillButtonStyle: ButtonStyle {
     }
 }
 
+// Pulses from the clock instead of a repeating animation, which would leak into layout changes of the panel.
 private struct RecordingDot: View {
-    let reduceMotion: Bool
-    @ViewState private var dimmed = false
+    let animated: Bool
 
     var body: some View {
-        Circle().fill(.red)
-            .frame(width: 8, height: 8)
-            .opacity(dimmed ? 0.35 : 1)
-            .onAppear {
-                guard !reduceMotion else { return }
-                withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) { dimmed = true }
-            }
+        TimelineView(.animation(minimumInterval: 1 / 30, paused: !animated)) { context in
+            let phase = context.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 1.8) / 1.8
+            Circle().fill(.red)
+                .frame(width: 8, height: 8)
+                .opacity(animated ? 0.65 + 0.35 * cos(phase * 2 * .pi) : 1)
+        }
+        .frame(width: 8, height: 8)
     }
 }
 
@@ -243,7 +270,6 @@ private struct RecordingElapsedTime: View {
             let elapsed = max(0, Int(context.date.timeIntervalSince(startedAt)))
             Text(elapsed >= 3600 ? String(format: "%d:%02d:%02d", elapsed / 3600, elapsed / 60 % 60, elapsed % 60)
                                  : String(format: "%02d:%02d", elapsed / 60, elapsed % 60))
-                .contentTransition(.numericText())
         }
     }
 }
