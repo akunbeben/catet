@@ -6,150 +6,177 @@ import Combine
 typealias ViewState<Value> = SwiftUI.State<Value>
 
 struct FloatingPill: View {
+    enum Mode { case idle, recording, finishing }
+
     static let hoverPadding: CGFloat = 12
-    static let surfaceHeight: CGFloat = 48
-    static let collapsedWidth: CGFloat = 12 + hoverPadding
-    static let expandedWidth: CGFloat = 280 + hoverPadding
-    static let height: CGFloat = surfaceHeight + hoverPadding * 2
-    static let keyboardHintHeight: CGFloat = 32
-    static let animationDuration = 0.24
+    static let surfaceHeight: CGFloat = 44
+    static let keyboardHintHeight: CGFloat = 30
+    static let animationDuration = 0.28
+    static let cornerRadius: CGFloat = 14
+
+    // Collapsed, the panel stays a quiet edge tab. While recording it keeps the timer visible.
+    static func surfaceWidth(_ mode: Mode, expanded: Bool) -> CGFloat {
+        switch (mode, expanded) {
+        case (.idle, false): return 8
+        case (.recording, false): return 74
+        case (.finishing, false): return 36
+        case (.idle, true): return 232
+        case (.recording, true), (.finishing, true): return 268
+        }
+    }
+
+    static func panelSize(_ mode: Mode, expanded: Bool, keyboard: Bool) -> NSSize {
+        let height = surfaceHeight + (expanded && keyboard ? keyboardHintHeight : 0)
+        return NSSize(width: surfaceWidth(mode, expanded: expanded) + hoverPadding, height: height + hoverPadding * 2)
+    }
 
     @ObservedObject var controller: CatetController
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ViewState private var hovered = false
     @ViewState private var collapseTask: Task<Void, Never>?
-    private var transitionAnimation: Animation? { reduceMotion ? nil : .easeInOut(duration: Self.animationDuration) }
+
+    private var mode: Mode { controller.pillMode }
+    private var expanded: Bool { controller.pillExpanded }
+    private var showsKeyboardHints: Bool { expanded && controller.quickRecordingKeyboardActive }
+    private var animation: Animation? { reduceMotion ? nil : .spring(response: Self.animationDuration, dampingFraction: 0.86) }
+    private var finishingMessage: String {
+        controller.liveTranscriptionStatusMessage.isEmpty ? "Finishing transcript" : controller.liveTranscriptionStatusMessage
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 0) {
             ZStack(alignment: .leading) {
-                if controller.pillExpanded {
-                    controls
-                        .frame(width: Self.expandedWidth - Self.hoverPadding, height: Self.surfaceHeight)
-                        .transition(.opacity)
+                if expanded {
+                    expandedContent.transition(.opacity)
                 } else {
-                    Capsule().fill(controller.isRecording ? Color.red : Color.white.opacity(0.45))
-                        .frame(width: controller.isRecording ? 4 : 3, height: 22)
-                        .frame(width: Self.collapsedWidth - Self.hoverPadding, height: Self.surfaceHeight)
-                        .accessibilityLabel(controller.isRecording ? "Recording in progress" : "Catet")
-                        .help(controller.isRecording ? "Recording in progress" : "Catet")
-                        .transition(.opacity)
+                    collapsedContent.transition(.opacity)
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
             .frame(height: Self.surfaceHeight)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(.white.opacity(0.10), lineWidth: 0.5))
-            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-            if controller.pillExpanded && controller.quickRecordingKeyboardActive {
+            if showsKeyboardHints {
+                Divider().opacity(0.5)
                 QuickRecordingKeyboardHints(recording: controller.isRecording)
-                    .frame(height: 24)
-                    .padding(.horizontal, 8)
-                    .background(.ultraThinMaterial, in: Capsule())
+                    .frame(maxWidth: .infinity, minHeight: Self.keyboardHintHeight - 1)
                     .transition(.opacity)
             }
         }
+        .frame(width: Self.surfaceWidth(mode, expanded: expanded), alignment: .leading)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous).strokeBorder(.white.opacity(0.1), lineWidth: 0.5))
+        .clipShape(RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous))
         .padding(EdgeInsets(top: Self.hoverPadding, leading: 0, bottom: Self.hoverPadding, trailing: Self.hoverPadding))
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .contentShape(Rectangle())
         .preferredColorScheme(.dark)
-        .animation(transitionAnimation, value: controller.pillExpanded)
-        .animation(transitionAnimation, value: controller.isRecording)
-        .animation(transitionAnimation, value: controller.quickRecordingKeyboardActive)
+        .animation(animation, value: expanded)
+        .animation(animation, value: mode)
+        .animation(animation, value: showsKeyboardHints)
         .onHover(perform: updateHover)
-        .onChange(of: controller.isRecording) { _, _ in controller.setPillExpanded(hovered) }
+        .onChange(of: mode) { _, _ in controller.setPillExpanded(hovered) }
         .onChange(of: controller.quickRecordingKeyboardActive) { _, active in
             if !active || controller.isRecording { controller.setPillExpanded(hovered) }
         }
         .onDisappear { collapseTask?.cancel() }
     }
 
-    private var controls: some View {
+    @ViewBuilder private var collapsedContent: some View {
+        switch mode {
+        case .idle:
+            Capsule().fill(.white.opacity(0.4))
+                .frame(width: 2, height: 18)
+                .frame(maxWidth: .infinity)
+                .accessibilityLabel("Catet")
+                .help("Catet")
+        case .recording:
+            HStack(spacing: 6) {
+                RecordingDot(reduceMotion: reduceMotion)
+                timer.font(.system(size: 12, weight: .semibold).monospacedDigit())
+            }
+            .frame(maxWidth: .infinity)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Recording in progress")
+        case .finishing:
+            ProgressView().controlSize(.small)
+                .frame(maxWidth: .infinity)
+                .help(finishingMessage)
+                .accessibilityLabel("Finishing transcription")
+        }
+    }
+
+    private var expandedContent: some View {
         HStack(spacing: 10) {
-            if controller.isRecording {
-                Circle().fill(.red).frame(width: 6, height: 6)
-            } else if controller.hasActiveRecordingLifecycle {
-                ProgressView().controlSize(.small).tint(.white)
-            } else {
-                Image(nsImage: CatetBrand.mark).resizable().scaledToFit().frame(width: 14, height: 14)
-            }
-            VStack(alignment: .leading, spacing: 2) {
-                Text(controller.isRecording ? "Recording" : controller.hasActiveRecordingLifecycle ? "Transcribing" : "Catet")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.65))
-                Group {
-                    if controller.isRecording {
-                        if let startedAt = controller.recordingStartedAt {
-                            RecordingElapsedTime(startedAt: startedAt)
-                        } else {
-                            Text("00:00")
-                        }
-                    } else if controller.hasActiveRecordingLifecycle {
-                        Text(controller.liveTranscriptionStatusMessage.isEmpty ? "Finishing transcript" : controller.liveTranscriptionStatusMessage)
-                            .lineLimit(1)
-                    } else {
-                        Text("Ready to record")
-                    }
-                }
-                    .font(.system(size: 12, weight: .semibold, design: controller.isRecording ? .monospaced : .default))
-                    .monospacedDigit()
-                    .foregroundStyle(.white)
-            }
-            .fixedSize()
-            Spacer(minLength: 0)
-            if controller.isRecording {
-                HStack(spacing: 8) {
-                    sourceIcon(controller.micAvailable ? "mic.fill" : "mic.slash.fill",
-                               active: controller.micAvailable, label: controller.micAvailable ? "Microphone on" : "Microphone unavailable")
-                    sourceIcon(controller.systemAudioAvailable ? "speaker.wave.2.fill" : "speaker.slash.fill",
-                               active: controller.systemAudioAvailable, label: controller.systemAudioAvailable ? "System audio on" : "System audio off")
-                }
-                Button { controller.stopRecording() } label: {
-                    Image(systemName: "stop.fill")
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundStyle(.white)
-                        .frame(width: 30, height: 30)
-                        .background(Color.red, in: Circle())
-                }
-                .help("Stop recording")
-                .accessibilityLabel("Stop recording")
-            } else if controller.hasActiveRecordingLifecycle {
-                ProgressView().controlSize(.small).tint(.white)
-                    .help(controller.liveTranscriptionStatusMessage.isEmpty ? "Finishing transcript" : controller.liveTranscriptionStatusMessage)
-                    .accessibilityLabel("Finishing transcription")
-            } else {
+            switch mode {
+            case .idle:
                 Button { controller.beginRecordingFlow() } label: {
-                    HStack(spacing: 5) {
-                        Circle().fill(.white).frame(width: 6, height: 6)
-                        Text("Record").font(.system(size: 11, weight: .semibold))
+                    HStack(spacing: 6) {
+                        Circle().fill(.white).frame(width: 7, height: 7)
+                        Text("Record").font(.system(size: 12, weight: .semibold))
                     }
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 10)
+                    .padding(.horizontal, 12)
                     .frame(height: 28)
                     .background(Color.red, in: Capsule())
                 }
+                .buttonStyle(PillButtonStyle())
+                .help(controller.quickRecordingShortcutAvailable ? "Start recording (\(QuickRecordingShortcut.displayShortcut))" : "Start recording")
                 .accessibilityLabel("Start recording")
+                Spacer(minLength: 0)
+                if controller.quickRecordingShortcutAvailable && !showsKeyboardHints {
+                    KeyboardKeycap(QuickRecordingShortcut.displayShortcut)
+                }
+            case .recording:
+                RecordingDot(reduceMotion: reduceMotion)
+                timer.font(.system(size: 15, weight: .semibold).monospacedDigit())
+                Spacer(minLength: 0)
+                sourceIcon(controller.micAvailable ? "mic.fill" : "mic.slash.fill", active: controller.micAvailable,
+                           label: controller.micAvailable ? "Microphone on" : "Microphone unavailable")
+                sourceIcon(controller.systemAudioAvailable ? "speaker.wave.2.fill" : "speaker.slash.fill", active: controller.systemAudioAvailable,
+                           label: controller.systemAudioAvailable ? "System audio on" : "System audio off")
+                Button { controller.stopRecording() } label: {
+                    RoundedRectangle(cornerRadius: 2.5, style: .continuous).fill(.white)
+                        .frame(width: 10, height: 10)
+                        .frame(width: 28, height: 28)
+                        .background(Color.red, in: Circle())
+                }
+                .buttonStyle(PillButtonStyle())
+                .help("Stop recording")
+                .accessibilityLabel("Stop recording")
+            case .finishing:
+                ProgressView().controlSize(.small)
+                Text(finishingMessage)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .help(finishingMessage)
+                Spacer(minLength: 0)
             }
-            Rectangle().fill(.white.opacity(0.12)).frame(width: 1, height: 18)
             Button { controller.showLibrary() } label: {
                 Image(systemName: "list.bullet")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.8))
-                    .frame(width: 24, height: 30)
-                    .contentShape(Rectangle())
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 28, height: 28)
             }
+            .buttonStyle(PillButtonStyle(hoverFill: true))
             .help("Open meetings")
             .accessibilityLabel("Open meetings")
         }
-        .buttonStyle(.plain)
-        .padding(.horizontal, 12)
+        .padding(.leading, mode == .idle ? 8 : 14)
+        .padding(.trailing, 8)
+        .frame(width: Self.surfaceWidth(mode, expanded: true), alignment: .leading)
+    }
+
+    @ViewBuilder private var timer: some View {
+        if let startedAt = controller.recordingStartedAt {
+            RecordingElapsedTime(startedAt: startedAt)
+        } else {
+            Text("00:00")
+        }
     }
 
     private func sourceIcon(_ symbol: String, active: Bool, label: String) -> some View {
         Image(systemName: symbol)
             .font(.system(size: 11, weight: .medium))
-            .foregroundStyle(active ? Color.white.opacity(0.65) : Color.orange)
-            .frame(width: 14)
+            .foregroundStyle(active ? Color.secondary : Color.orange)
+            .frame(width: 16)
             .help(label)
             .accessibilityLabel(label)
     }
@@ -168,7 +195,44 @@ struct FloatingPill: View {
             }
         }
     }
+}
 
+private struct PillButtonStyle: ButtonStyle {
+    var hoverFill = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        PillButtonBody(configuration: configuration, hoverFill: hoverFill)
+    }
+
+    private struct PillButtonBody: View {
+        let configuration: ButtonStyleConfiguration
+        let hoverFill: Bool
+        @ViewState private var hovered = false
+
+        var body: some View {
+            configuration.label
+                .background(hoverFill && hovered ? Color.white.opacity(0.1) : .clear, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                .brightness(!hoverFill && hovered ? 0.06 : 0)
+                .opacity(configuration.isPressed ? 0.75 : 1)
+                .contentShape(Rectangle())
+                .onHover { hovered = $0 }
+        }
+    }
+}
+
+private struct RecordingDot: View {
+    let reduceMotion: Bool
+    @ViewState private var dimmed = false
+
+    var body: some View {
+        Circle().fill(.red)
+            .frame(width: 8, height: 8)
+            .opacity(dimmed ? 0.35 : 1)
+            .onAppear {
+                guard !reduceMotion else { return }
+                withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) { dimmed = true }
+            }
+    }
 }
 
 private struct RecordingElapsedTime: View {
@@ -177,7 +241,9 @@ private struct RecordingElapsedTime: View {
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
             let elapsed = max(0, Int(context.date.timeIntervalSince(startedAt)))
-            Text(String(format: "%02d:%02d", elapsed / 60, elapsed % 60))
+            Text(elapsed >= 3600 ? String(format: "%d:%02d:%02d", elapsed / 3600, elapsed / 60 % 60, elapsed % 60)
+                                 : String(format: "%02d:%02d", elapsed / 60, elapsed % 60))
+                .contentTransition(.numericText())
         }
     }
 }

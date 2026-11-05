@@ -172,6 +172,8 @@ final class CatetController: ObservableObject {
     @Published var quickRecordingKeyboardActive = false
     @Published var quickRecordingShortcutAvailable = false
     @Published private(set) var pillExpanded = false
+    var pillMode: FloatingPill.Mode { isRecording ? .recording : hasActiveRecordingLifecycle ? .finishing : .idle }
+    private var pillResizeTask: Task<Void, Never>?
     @Published var codexAccounts: [CodexAccount] = []
     @Published var selectedCodexAccountID = "default"
     var codexAccountsWindow: CodexAccountsWindow?
@@ -322,7 +324,8 @@ final class CatetController: ObservableObject {
         refresh()
     }
     private func makePill() {
-        let panel = FloatingPanel(contentRect: NSRect(x: 0, y: 0, width: FloatingPill.collapsedWidth, height: FloatingPill.height), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        let size = FloatingPill.panelSize(.idle, expanded: false, keyboard: false)
+        let panel = FloatingPanel(contentRect: NSRect(origin: .zero, size: size), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.level = .floating; panel.isOpaque = false; panel.backgroundColor = .clear; panel.hasShadow = true; panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         let content = NSHostingView(rootView: FloatingPill(controller: self))
         content.sizingOptions = []
@@ -330,25 +333,29 @@ final class CatetController: ObservableObject {
         panel.onKeyboardEvent = { [weak self] event in self?.handleQuickRecordingKey(event) ?? false }
         panel.onKeyboardDismiss = { [weak self] in self?.dismissQuickRecordingKeyboard() }
         if let screen = NSScreen.main {
-            panel.setFrameOrigin(NSPoint(x: screen.visibleFrame.minX + 2, y: screen.visibleFrame.midY - FloatingPill.height / 2))
+            panel.setFrameOrigin(NSPoint(x: screen.visibleFrame.minX + 2, y: screen.visibleFrame.midY - size.height / 2))
         }
         panel.orderFrontRegardless(); pillWindow = panel
     }
     func setPillExpanded(_ expanded: Bool) {
         if pillExpanded != expanded { pillExpanded = expanded }
         guard let panel = pillWindow, let screen = panel.screen ?? NSScreen.main else { return }
-        let width = expanded ? FloatingPill.expandedWidth : FloatingPill.collapsedWidth
-        let height = FloatingPill.height + (expanded && quickRecordingKeyboardActive ? FloatingPill.keyboardHintHeight : 0)
-        let target = NSRect(x: screen.visibleFrame.minX + 2, y: panel.frame.maxY - height, width: width, height: height)
-        guard panel.frame != target else { return }
-        if quickRecordingKeyboardActive || NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+        let size = FloatingPill.panelSize(pillMode, expanded: expanded, keyboard: quickRecordingKeyboardActive)
+        let target = NSRect(x: screen.visibleFrame.minX + 2, y: panel.frame.maxY - size.height, width: size.width, height: size.height)
+        pillResizeTask?.cancel()
+        // SwiftUI animates the surface inside the panel. Grow the panel first, and shrink it only after the animation ends.
+        let grown = NSRect(x: target.minX, y: min(target.minY, panel.frame.minY),
+                           width: max(target.width, panel.frame.width), height: max(target.maxY, panel.frame.maxY) - min(target.minY, panel.frame.minY))
+        if panel.frame != grown { panel.setFrame(grown, display: true) }
+        guard grown != target else { return }
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
             panel.setFrame(target, display: true)
-        } else {
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = FloatingPill.animationDuration
-                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-                panel.animator().setFrame(target, display: true)
-            }
+            return
+        }
+        pillResizeTask = Task { @MainActor [weak panel] in
+            try? await Task.sleep(for: .seconds(FloatingPill.animationDuration + 0.08))
+            guard !Task.isCancelled, let panel else { return }
+            panel.setFrame(target, display: true)
         }
     }
     func toggleQuickRecordingKeyboard() {
